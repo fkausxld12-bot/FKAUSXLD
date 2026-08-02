@@ -61,6 +61,7 @@ const emptyDb = () => ({
     boTable: '', // 게시판 코드 (예: ymh14141)
     wrId: 0, // 고정 글 번호 (followLatest=false일 때만 사용)
     followLatest: true, // 항상 게시판의 최신 글을 추적
+    short: false, // 짧은 주소(/게시판코드/글번호) 형식 사이트인지
     mbId: '', // 사이트 로그인 아이디 (비밀댓글 보기용, 선택)
     mbPw: '',
     processed: {}, // 처리한 댓글 key → 주문 id 또는 'skipped'
@@ -232,6 +233,8 @@ const routes = {
       fetchedAt: nongraCache.fetchedAt,
       error: nongraCache.error,
       loggedIn: nongraCache.loggedIn,
+      sales: nongraCache.sales, // 판매 페이지 상품·재고·판매 현황
+      orderedTotal: nongraCache.sales.products.reduce((s, p) => s + p.sold + p.progress, 0),
     },
     store: storePublic(),
     updatedAt: db.updatedAt,
@@ -427,6 +430,7 @@ const routes = {
       db.nongra.base = parsed.base;
       db.nongra.boTable = parsed.boTable;
       db.nongra.wrId = parsed.wrId;
+      db.nongra.short = parsed.short;
       db.nongra.followLatest = body.followLatest !== undefined ? Boolean(body.followLatest) : true;
       nongraCache.inbox = [];
       nongraCache.fetchedAt = null;
@@ -473,16 +477,14 @@ const routes = {
     if (!n.base || !n.boTable) throw httpError(400, '먼저 연동 설정을 저장해 주세요.');
     if (n.mbId && !nongraCache.loggedIn) await nongraLogin().catch(() => {});
 
-    const listRes = await nongraFetch(`${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}`);
+    const listRes = await nongraFetch(nongraListUrl());
     const listHtml = await listRes.text();
     const wrIds = parseWrIds(listHtml, n.boTable);
 
     const posts = [];
     for (const wrId of wrIds.slice(0, 3)) {
       try {
-        const res = await nongraFetch(
-          `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`,
-        );
+        const res = await nongraFetch(nongraPostUrl(wrId));
         const html = await res.text();
         const p = parseOrderPost(html, wrId);
         posts.push({
@@ -602,6 +604,8 @@ function nongraPublic() {
 }
 
 // 붙여넣은 게시글/게시판 주소에서 사이트 주소·게시판 코드·글 번호를 뽑아냅니다.
+// 두 형식을 모두 지원: farmer4989.com/ymh14141/49 (짧은 주소),
+//                     .../bbs/board.php?bo_table=ymh14141&wr_id=49
 function parseNongraUrl(raw) {
   let url;
   try {
@@ -609,23 +613,69 @@ function parseNongraUrl(raw) {
   } catch {
     throw httpError(400, '주소가 올바르지 않습니다. 게시글 주소를 그대로 붙여넣어 주세요.');
   }
-  const boTable = url.searchParams.get('bo_table');
-  if (!boTable) throw httpError(400, '게시판 주소가 아닙니다. bo_table이 포함된 글 주소를 붙여넣어 주세요.');
-  const wrId = Number(url.searchParams.get('wr_id')) || 0;
-  // /gnuboard5/bbs/board.php → base는 /gnuboard5
-  const basePath = url.pathname.replace(/\/bbs\/[^/]*$/, '');
-  return { base: url.origin + basePath, boTable, wrId };
+
+  const boTableParam = url.searchParams.get('bo_table');
+  if (boTableParam) {
+    const wrId = Number(url.searchParams.get('wr_id')) || 0;
+    const basePath = url.pathname.replace(/\/bbs\/[^/]*$/, '');
+    return { base: url.origin + basePath, boTable: boTableParam, wrId, short: false };
+  }
+
+  // 짧은 주소: /게시판코드/글번호
+  const seg = url.pathname.split('/').filter(Boolean);
+  if (seg.length >= 1 && /^[A-Za-z0-9_]+$/.test(seg[0])) {
+    return {
+      base: url.origin,
+      boTable: seg[0],
+      wrId: seg[1] && /^\d+$/.test(seg[1]) ? Number(seg[1]) : 0,
+      short: true,
+    };
+  }
+  throw httpError(400, '게시판 주소를 알아보지 못했습니다. 주문서 페이지 주소를 그대로 붙여넣어 주세요.');
+}
+
+function nongraListUrl() {
+  const n = db.nongra;
+  return n.short
+    ? `${n.base}/${n.boTable}`
+    : `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}`;
+}
+
+function nongraPostUrl(wrId) {
+  const n = db.nongra;
+  return n.short
+    ? `${n.base}/${n.boTable}/${wrId}`
+    : `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`;
 }
 
 // 자동으로 가져온 농라 글·댓글 캐시. 화면은 이 캐시를 읽어갑니다.
 const nongraCache = {
-  inbox: [], // [{ postKey, title, snippet, commentCount, comments: [...] }]
+  inbox: [], // 주문서 글 후보들
+  sales: { wrId: 0, products: [], fetchedAt: null }, // 판매 페이지의 상품·재고·판매 현황
   fetchedAt: null,
   error: '',
   polling: false,
   cookies: {}, // 로그인 세션 쿠키
   loggedIn: false,
 };
+
+// 판매 페이지에서 읽은 상품 현황을 반영하고, 판매 수량이 늘면 기록을 남깁니다.
+function applySalesWidget(wrId, widget) {
+  const prevMap = new Map(nongraCache.sales.products.map((p) => [p.name, p]));
+  for (const p of widget) {
+    const old = prevMap.get(p.name);
+    if (old) {
+      const diff = (p.sold + p.progress) - (old.sold + old.progress);
+      if (diff > 0) {
+        logHistory('sale', `농라F: ${p.name} ${diff}개 주문됨 (남은 재고 ${p.stock}개)`);
+      }
+    }
+    if (p.stock === 0 && (!old || old.stock > 0)) {
+      logHistory('stock', `농라F: ${p.name} 품절`);
+    }
+  }
+  nongraCache.sales = { wrId, products: widget, fetchedAt: new Date().toISOString() };
+}
 
 const NONGRA_POLL_MS = 3 * 60 * 1000; // 3분마다 자동 확인
 
@@ -701,11 +751,17 @@ function stripTags(html) {
 }
 
 // 게시판 목록 페이지에서 글 번호들을 최신순으로 찾습니다.
+// 두 링크 형식 모두 지원: board.php?bo_table=X&wr_id=N, /X/N (짧은 주소)
 function parseWrIds(html, boTable, limit = 15) {
   const ids = new Set();
-  const re = new RegExp(`bo_table=${boTable}(?:&(?:amp;)?[^"'\\s]*)?&(?:amp;)?wr_id=(\\d+)`, 'g');
-  let m;
-  while ((m = re.exec(html))) ids.add(Number(m[1]));
+  const patterns = [
+    new RegExp(`bo_table=${boTable}(?:&(?:amp;)?[^"'\\s]*)?&(?:amp;)?wr_id=(\\d+)`, 'g'),
+    new RegExp(`href="[^"]*/${boTable}/(\\d+)`, 'g'),
+  ];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(html))) ids.add(Number(m[1]));
+  }
   return [...ids].sort((a, b) => b - a).slice(0, limit);
 }
 
@@ -779,6 +835,216 @@ function parseOrderPost(html, wrId) {
   };
 }
 
+/**
+ * 판매 페이지의 상품 선택표를 읽습니다.
+ * "장미)원탑(sp) [재고:10 진행:0 판매:6] 8,000원" 형태의 줄을
+ * { name, price, stock, progress, sold }로 만듭니다.
+ */
+function parseSalesWidget(html) {
+  const text = stripTags(
+    String(html).replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
+  );
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const products = [];
+  let pending = null; // 이름·가격이 먼저 나오고 다음 줄에 [재고...]가 오는 스킨 대응
+
+  for (const line of lines) {
+    const counts = line.match(/재고\s*[:：]?\s*(\d+)[^\d]{0,12}진행\s*[:：]?\s*(\d+)[^\d]{0,12}판매\s*[:：]?\s*(\d+)/);
+    if (!counts) {
+      // 다음 줄에 [재고...]가 오는 스킨을 위해 이 줄을 후보로 기억해 둡니다.
+      const np = line.match(/^(.+?)\s*([\d,]{3,})\s*원\s*$/);
+      if (np && !/합계|배송|총|주문/.test(np[1])) {
+        pending = { name: np[1].trim(), price: num(np[2]) };
+      } else if (line.length <= 60 && !/^[−\-+\d\s,원개]+$/.test(line)
+        && !/상품\s*선택|주문수량|합계|배송|영수증/.test(line)) {
+        pending = { name: line, price: 0 }; // 상품명만 있는 줄
+      } else {
+        pending = null;
+      }
+      continue;
+    }
+
+    const priceMatch = line.match(/([\d,]{3,})\s*원/);
+    const cut = Math.min(counts.index, priceMatch ? priceMatch.index : Infinity);
+    let name = line.slice(0, cut).replace(/[[\]|·\-–—+\d\s]+$/, '').trim();
+    let price = priceMatch ? num(priceMatch[1]) : 0;
+    if (!name && pending) {
+      name = pending.name;
+      price = price || pending.price;
+    }
+    pending = null;
+    if (!name || /상품\s*선택|주문수량|합계/.test(name)) continue;
+
+    products.push({
+      name,
+      price,
+      stock: Number(counts[1]),
+      progress: Number(counts[2]),
+      sold: Number(counts[3]),
+    });
+  }
+  return products;
+}
+
+/**
+ * 판매 페이지 아래의 주문 목록을 읽습니다. 화면 형식:
+ *   26-08-02 18:16 [i] 25244070 [영수증] 입금완료
+ *   임현경 (멜리싸) 01053964460
+ *   [임현경] 경기 고양시 ... 영어학원
+ *   국화)아르거스 (1 개)
+ *   장미)비포썬셋(sp) (1 개)
+ *   22,000 원
+ */
+function parseSiteOrders(html) {
+  const text = stripTags(
+    String(html).replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
+  );
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const STATUS_WORDS = /입금완료|입금대기|결제완료|발송완료|배송완료|주문취소|취소/;
+  const entries = [];
+  let cur = null;
+
+  for (const line of lines) {
+    const start = line.match(/^(\d{2}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
+    if (start) {
+      if (cur) entries.push(cur);
+      cur = {
+        orderNo: (line.match(/\b(\d{6,})\b/) || [])[1] || '',
+        date: start[1],
+        time: start[2],
+        status: (line.match(STATUS_WORDS) || [])[0] || '',
+        buyer: '',
+        phone: '',
+        address: '',
+        items: [],
+        total: 0,
+      };
+      continue;
+    }
+    if (!cur) continue;
+
+    if (!cur.status) {
+      const st = line.match(STATUS_WORDS);
+      if (st) cur.status = st[0];
+    }
+
+    const phoneM = line.match(/(01[016789])[-\s.]?(\d{3,4})[-\s.]?(\d{4})/);
+    if (phoneM && !cur.phone) {
+      cur.phone = `${phoneM[1]}-${phoneM[2]}-${phoneM[3]}`;
+      const before = line.slice(0, phoneM.index).trim();
+      if (before && !cur.buyer) cur.buyer = before;
+      continue;
+    }
+
+    const addrM = line.match(/^\[([^\]]+)\]\s*(.+)/);
+    if (addrM && !cur.address && !/영수증/.test(addrM[1])) {
+      cur.address = addrM[2].trim();
+      if (!cur.buyer) cur.buyer = addrM[1];
+      continue;
+    }
+
+    if (/재고\s*[:：]|진행\s*[:：]/.test(line)) continue; // 상품 선택표 줄은 제외
+
+    const parsed = parseLine(line);
+    if (parsed && /\d\s*개/.test(line)) {
+      cur.items.push(parsed);
+      continue;
+    }
+
+    const totalM = line.match(/^([\d,]{4,})\s*원\s*$/);
+    if (totalM) cur.total = num(totalM[1]);
+  }
+  if (cur) entries.push(cur);
+  return entries.filter((e) => e.orderNo && e.items.length);
+}
+
+const SITE_STATUS_MAP = {
+  입금대기: 'new', 입금완료: 'paid', 결제완료: 'paid',
+  발송완료: 'shipped', 배송완료: 'shipped', 주문취소: 'canceled', 취소: 'canceled',
+};
+const STATUS_RANK = { new: 0, paid: 1, ready: 2, shipped: 3 };
+
+// 읽어온 사이트 주문을 등록/동기화합니다. (주문번호 기준 중복 방지)
+function applySiteOrders(entries) {
+  let changed = false;
+  const unitPriceOf = (name) => {
+    const key = String(name).replace(/\s+/g, '');
+    const p = nongraCache.sales.products.find((x) => x.name.replace(/\s+/g, '') === key);
+    return p ? p.price : 0;
+  };
+
+  for (const e of entries) {
+    const key = `o${e.orderNo}`;
+    const items = e.items.map((it) => ({
+      productId: null,
+      name: it.name,
+      qty: it.qty,
+      price: it.amount || unitPriceOf(it.name) * it.qty,
+    }));
+    // 품목별 가격을 모르면 주문 합계를 첫 품목에 담아 총액을 보존합니다.
+    if (items.length && items.every((i) => !i.price) && e.total) items[0].price = e.total;
+
+    const siteStatus = SITE_STATUS_MAP[e.status] || 'new';
+    const createdAt = (() => {
+      const d = new Date(`20${e.date}T${e.time}:00`);
+      return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+    })();
+
+    const existingId = db.nongra.processed[key];
+    if (!existingId) {
+      db.orderSeq += 1;
+      const order = {
+        id: nextId(),
+        no: db.orderSeq,
+        channel: 'nongra',
+        buyer: e.buyer,
+        phone: e.phone,
+        address: e.address,
+        memo: `농라F 주문 ${e.orderNo}`,
+        items,
+        status: siteStatus,
+        createdAt,
+        shippedAt: siteStatus === 'shipped' ? createdAt : null,
+        printedAt: null,
+      };
+      db.orders.unshift(order);
+      db.nongra.processed[key] = order.id;
+      logHistory('order', `농라F 주문 ${e.orderNo} 자동 등록 → 주문 #${order.no} (${e.buyer})`);
+      changed = true;
+      continue;
+    }
+
+    const order = findOrder(existingId);
+    if (!order) continue;
+
+    const sig = (list) => JSON.stringify(list.map((i) => [i.name, i.qty]));
+    let touched = false;
+    if (sig(order.items) !== sig(items)) {
+      order.items = items;
+      touched = true;
+    } else if (order.items.every((i) => !i.price) && items.some((i) => i.price)) {
+      // 처음에 가격을 전혀 몰랐던 주문은 상품표를 알게 된 뒤 가격을 채워 넣습니다.
+      order.items = items;
+      touched = true;
+    }
+    if (siteStatus === 'canceled' && order.status !== 'canceled') {
+      order.status = 'canceled';
+      touched = true;
+    } else if (order.status !== 'canceled'
+      && (STATUS_RANK[siteStatus] ?? 0) > (STATUS_RANK[order.status] ?? 0)) {
+      order.status = siteStatus; // 사이트에서 입금완료/발송완료로 바뀌면 따라갑니다.
+      if (siteStatus === 'shipped') order.shippedAt = new Date().toISOString();
+      touched = true;
+    }
+    if (touched) {
+      logHistory('order', `농라F 주문 ${e.orderNo} 변경 감지 → 주문 #${order.no} 동기화`);
+      changed = true;
+    }
+  }
+  if (changed) save();
+  return changed;
+}
+
 async function pollNongra(force = false) {
   const n = db.nongra;
   if (!n.base || !n.boTable || nongraCache.polling) return;
@@ -788,20 +1054,31 @@ async function pollNongra(force = false) {
     if (n.mbId && !nongraCache.loggedIn) await nongraLogin().catch(() => {});
 
     // 게시판 목록에서 최신 주문서 글 번호들을 가져옵니다.
-    const listRes = await nongraFetch(`${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}`);
+    const listRes = await nongraFetch(nongraListUrl());
     const listHtml = await listRes.text();
     const wrIds = parseWrIds(listHtml, n.boTable);
     if (!wrIds.length) throw httpError(502, '게시판에서 글을 찾지 못했습니다. 주소를 확인해 주세요.');
 
-    // 최신 글들을 매번 다시 읽습니다. (주문서가 수정되어도 따라잡기 위해)
+    // 최신 글들을 매번 다시 읽습니다. (수정·품절·판매 수량 변화를 따라잡기 위해)
     const known = new Map(nongraCache.inbox.map((p) => [p.wrId, p]));
     const posts = [];
     for (const wrId of wrIds.slice(0, 10)) {
       try {
-        const res = await nongraFetch(
-          `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`,
-        );
-        posts.push(parseOrderPost(await res.text(), wrId));
+        const res = await nongraFetch(nongraPostUrl(wrId));
+        const html = await res.text();
+
+        // ① 상품 선택표가 있으면 = 판매 페이지 → 상품·재고·판매 수량 동기화
+        //    (주문보다 먼저 읽어야 품목별 개당 가격을 매칭할 수 있습니다)
+        const widget = parseSalesWidget(html);
+        if (widget.length >= 2) applySalesWidget(wrId, widget);
+
+        // ② 페이지에 주문 목록이 있으면 주문을 등록/동기화합니다.
+        const siteOrders = parseSiteOrders(html);
+        if (siteOrders.length) applySiteOrders(siteOrders);
+
+        if (widget.length >= 2 || siteOrders.length) continue; // 판매/주문 페이지는 주문서 글로 취급 안 함
+
+        posts.push(parseOrderPost(html, wrId));
       } catch {
         const cached = known.get(wrId);
         if (cached) posts.push(cached); // 일시 오류면 이전 내용 유지

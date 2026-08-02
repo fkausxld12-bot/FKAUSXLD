@@ -352,6 +352,9 @@ textarea { width: 100%; resize: vertical; }
 .stock-n small { display: block; font-size: 10px; font-weight: 500; color: var(--muted); }
 .stock-n.low { color: var(--danger); }
 
+.item.soldout { opacity: .55; }
+.soldout-chip { background: var(--danger); color: #fff; font-size: 11px; }
+
 /* ------------------------------------------------------------ 기록 */
 
 .history { list-style: none; margin: 0; padding: 0; }

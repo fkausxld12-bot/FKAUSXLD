@@ -87,15 +87,15 @@
       <h2>현장 판매 (배송비 없음)</h2>
       <button type="button" class="ghost" id="clearSale">비우기</button>
     </div>
-    <p class="hint pad-h">품목을 누르면 담기고, 수량을 조절하면 배송비 빼고 가격이 바로 나옵니다.
-      가격은 주문서에서 자동으로 배웁니다.</p>
-    <div class="product-grid" id="saleGrid"></div>
+    <p class="hint pad-h" id="saleHint">농라F 판매 페이지의 상품·재고가 자동으로 여기에 동기화됩니다.
+      +/− 로 수량을 넣으면 배송비 빼고 가격이 바로 나옵니다.</p>
+    <ul class="items" id="saleList"></ul>
+    <p class="empty hidden" id="emptySale">농라F 연동을 마치면 판매 페이지의 상품이 자동으로 나타납니다.</p>
     <div class="adder-actions pad">
       <input id="customName" placeholder="직접 입력: 품목명" autocomplete="off" style="flex:1" />
       <input id="customPrice" placeholder="개당 가격" inputmode="numeric" autocomplete="off" style="width:110px" />
       <button type="button" class="ghost" id="customAdd">담기</button>
     </div>
-    <ul class="cart" id="saleCart"></ul>
     <div class="cart-total">
       <div class="row"><span>합계 (배송비 제외)</span><strong id="saleTotal">0원</strong></div>
       <button type="button" class="primary big" id="saleSubmit" disabled>현장 판매 등록</button>
@@ -119,6 +119,7 @@
           <option value="all">전체</option>
           <option value="nongra">농라만</option>
           <option value="store">스토어만</option>
+          <option value="field">현장 판매만</option>
           <option value="shipped">완료됨</option>
         </select>
         <button type="button" class="primary" id="toggleOrderForm">＋ 스토어 주문</button>
