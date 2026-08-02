@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#1f7a5a" />
+<title>꽃 작업장 주문·판매 관리</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🌸</text></svg>" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="topbar no-print">
+  <h1>꽃 작업장</h1>
+  <div class="conn"><span id="dot" class="dot"></span><span id="connText">연결 중…</span></div>
+</header>
+
+<nav class="tabs no-print">
+  <button type="button" class="tab active" data-tab="home">주문 확인 <span class="badge hidden" id="badgeNew"></span></button>
+  <button type="button" class="tab" data-tab="sale">현장 판매</button>
+  <button type="button" class="tab" data-tab="stock">재고</button>
+  <button type="button" class="tab" data-tab="invoice">송장 출력 <span class="badge hidden" id="badgeReady"></span></button>
+</nav>
+
+<main class="no-print">
+
+  <!-- ========================== 주문 확인 ========================== -->
+  <section class="view" id="view-home">
+    <div class="summary">
+      <div class="card"><span class="label">농라 신규</span><strong id="cntNongra">0</strong><span class="unit">건</span></div>
+      <div class="card"><span class="label">스토어 신규</span><strong id="cntStore">0</strong><span class="unit">건</span></div>
+      <div class="card"><span class="label">발송 대기</span><strong id="cntReady">0</strong><span class="unit">건</span></div>
+      <div class="card money"><span class="label">오늘 판매</span><strong id="sumToday">0</strong><span class="unit">원</span></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>주문 목록</h2>
+        <div class="row-gap">
+          <select id="orderFilter">
+            <option value="active">진행 중</option>
+            <option value="all">전체</option>
+            <option value="nongra">농라만</option>
+            <option value="store">스토어만</option>
+            <option value="field">현장 판매만</option>
+            <option value="shipped">발송 완료</option>
+          </select>
+          <button type="button" class="primary" id="toggleOrderForm">＋ 주문 등록</button>
+        </div>
+      </div>
+
+      <form class="order-form hidden" id="orderForm">
+        <div class="form-grid">
+          <label>채널
+            <select id="ofChannel">
+              <option value="nongra">농라</option>
+              <option value="store">스토어</option>
+            </select>
+          </label>
+          <label>주문자 <input id="ofBuyer" placeholder="이름" autocomplete="off" /></label>
+          <label>연락처 <input id="ofPhone" placeholder="010-0000-0000" autocomplete="off" /></label>
+          <label class="wide">주소 <input id="ofAddress" placeholder="배송지 주소" autocomplete="off" /></label>
+          <label class="wide">품목 (한 줄에 하나, 그대로 붙여넣기)
+            <textarea id="ofItems" rows="3" placeholder="유스커스(3개) 9,000원&#10;장미)자나(sp)(1개) 6,000원"></textarea>
+          </label>
+          <label class="wide">메모 <input id="ofMemo" placeholder="입금자명, 요청사항 등" autocomplete="off" /></label>
+        </div>
+        <div class="adder-actions">
+          <button type="submit" class="primary">등록 (재고 자동 차감)</button>
+          <button type="button" class="ghost" id="cancelOrderForm">닫기</button>
+        </div>
+      </form>
+
+      <ul class="orders" id="orderList"></ul>
+      <p class="empty hidden" id="emptyOrders">표시할 주문이 없습니다.</p>
+    </div>
+
+    <p class="note">※ 농라·스마트스토어 주문 자동 확인은 네이버 API 키가 있어야 연동됩니다.
+       지금은 주문 내용을 붙여넣어 등록하면 채널별로 정리해 줍니다.</p>
+  </section>
+
+  <!-- ========================== 현장 판매 계산기 ========================== -->
+  <section class="view hidden" id="view-sale">
+    <div class="panel">
+      <div class="panel-head"><h2>품목 선택 (누르면 담깁니다)</h2></div>
+      <div class="product-grid" id="productGrid"></div>
+      <p class="empty hidden" id="emptyProducts">재고 탭에서 품목을 먼저 등록해 주세요.</p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>계산서</h2><button type="button" class="ghost" id="clearCart">비우기</button></div>
+      <ul class="cart" id="cartList"></ul>
+      <p class="empty" id="emptyCart">담긴 품목이 없습니다.</p>
+
+      <div class="cart-total">
+        <div class="row"><span>합계</span><strong id="cartTotal">0원</strong></div>
+        <div class="row pay">
+          <label for="received">받은 돈</label>
+          <input id="received" inputmode="numeric" placeholder="0" autocomplete="off" />
+        </div>
+        <div class="quick-pay">
+          <button type="button" class="ghost" data-pay="exact">딱 맞게</button>
+          <button type="button" class="ghost" data-pay="10000">+1만</button>
+          <button type="button" class="ghost" data-pay="50000">+5만</button>
+        </div>
+        <div class="row change"><span>거스름돈</span><strong id="cartChange">0원</strong></div>
+        <button type="button" class="primary big" id="checkout">판매 완료 (재고 자동 차감)</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================== 재고 ========================== -->
+  <section class="view hidden" id="view-stock">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>재고 목록</h2>
+        <button type="button" class="ghost" id="toggleStockForm">＋ 품목 추가</button>
+      </div>
+
+      <div class="adder hidden" id="stockForm">
+        <p class="hint">주문 목록처럼 붙여넣으면 됩니다. 예: <code>장미)자나(sp)(10개) 60,000원</code> → 재고 10개, 개당 6,000원</p>
+        <textarea id="stockText" rows="4" placeholder="유스커스(3개) 9,000원&#10;장미)자나(sp)(10개) 60,000원"></textarea>
+        <div class="adder-actions">
+          <button type="button" class="primary" id="stockAdd">등록</button>
+          <button type="button" class="ghost" id="cancelStockForm">닫기</button>
+        </div>
+      </div>
+
+      <ul class="items" id="stockList"></ul>
+      <p class="empty hidden" id="emptyStock">등록된 품목이 없습니다.</p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>기록</h2></div>
+      <ul class="history" id="historyList"></ul>
+      <p class="empty hidden" id="emptyHistory">기록이 없습니다.</p>
+    </div>
+
+    <footer class="foot">
+      <p id="accessHint"></p>
+      <button type="button" class="ghost danger" id="resetAll">전체 비우기</button>
+    </footer>
+  </section>
+
+  <!-- ========================== 송장 출력 ========================== -->
+  <section class="view hidden" id="view-invoice">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>발송 대기 주문</h2>
+        <div class="row-gap">
+          <button type="button" class="ghost" id="invoiceSelectAll">전체 선택</button>
+          <button type="button" class="primary" id="printInvoices">🖨 선택 송장 출력</button>
+        </div>
+      </div>
+      <ul class="invoice-pick" id="invoicePick"></ul>
+      <p class="empty hidden" id="emptyInvoice">발송 대기 중인 주문이 없습니다.</p>
+      <div class="adder-actions pad">
+        <label class="check"><input type="checkbox" id="markShipped" checked /> 출력 후 발송 완료로 바꾸기</label>
+      </div>
+    </div>
+    <p class="note">※ 출력 화면에서 브라우저 인쇄(Ctrl+P)가 열립니다. A4 한 장에 송장 6칸씩 나옵니다.</p>
+  </section>
+</main>
+
+<!-- 인쇄 전용 영역 -->
+<div class="print-area" id="printArea"></div>
+
+<div class="toast hidden no-print" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
