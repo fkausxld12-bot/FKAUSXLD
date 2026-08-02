@@ -478,12 +478,12 @@ $('#runDiag').addEventListener('click', async () => {
         text += `오류: ${p.error}\n`;
         continue;
       }
-      text += `제목: ${p.title}\n`;
-      text += `비밀글: ${p.secret ? '예' : '아니오'} · 본문 찾음: ${p.bodyFound ? '예' : '아니오'} · 읽은 품목: ${p.itemsFound}개\n`;
-      if (p.items && p.items.length) {
-        text += `품목: ${p.items.map((i) => `${i.name} ${i.qty}개`).join(', ')}\n`;
-      }
-      text += `본문 미리보기:\n${p.bodyPreview}\n`;
+      text += `응답: ${p.status} (${fmt(p.bytes)}바이트) · 제목: ${p.title}\n`;
+      if (p.finalUrl) text += `실제 주소: ${p.finalUrl}\n`;
+      text += `상품표: ${p.widgetProducts}개 · 주문내역: ${p.siteOrders}건 · 본문품목: ${p.bodyItemsFound}개 · 비밀글: ${p.secret ? '예' : '아니오'}\n`;
+      if (p.widgetSample && p.widgetSample.length) text += `상품 예시: ${p.widgetSample.join(' | ')}\n`;
+      if (p.orderSample && p.orderSample.length) text += `주문 예시: ${p.orderSample.join(' | ')}\n`;
+      text += `페이지 내용 미리보기:\n${p.textPreview}\n`;
     }
     text += '\n※ 이 화면을 캡처해서 보내주시면 사이트에 맞게 조정해 드릴 수 있습니다.';
     out.textContent = text;

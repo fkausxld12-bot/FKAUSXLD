@@ -481,21 +481,37 @@ const routes = {
     const listHtml = await listRes.text();
     const wrIds = parseWrIds(listHtml, n.boTable);
 
+    // 설정한 판매 페이지를 맨 먼저, 그다음 최신 글 2개를 진단합니다.
+    const targets = [];
+    if (n.wrId) targets.push(n.wrId);
+    for (const id of wrIds) {
+      if (!targets.includes(id) && targets.length < 3) targets.push(id);
+    }
+
     const posts = [];
-    for (const wrId of wrIds.slice(0, 3)) {
+    for (const wrId of targets) {
       try {
         const res = await nongraFetch(nongraPostUrl(wrId));
         const html = await res.text();
+        const widget = parseSalesWidget(html);
+        const siteOrders = parseSiteOrders(html);
         const p = parseOrderPost(html, wrId);
+        const fullText = stripTags(
+          html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
+        );
         posts.push({
           wrId,
+          status: res.status,
+          bytes: html.length,
+          finalUrl: res.url || '',
           title: p.title,
           secret: p.secret,
-          itemsFound: p.items.length,
-          items: p.items.slice(0, 5),
-          buyer: p.buyer,
-          bodyFound: Boolean(p.debugBody),
-          bodyPreview: p.debugBody || '(본문을 찾지 못했습니다)',
+          widgetProducts: widget.length,
+          widgetSample: widget.slice(0, 3).map((w) => `${w.name} ${w.price}원 재고:${w.stock} 판매:${w.sold}`),
+          siteOrders: siteOrders.length,
+          orderSample: siteOrders.slice(0, 2).map((o) => `${o.orderNo} ${o.buyer} ${o.items.map((i) => `${i.name} ${i.qty}개`).join(',')}`),
+          bodyItemsFound: p.items.length,
+          textPreview: fullText.slice(0, 600) || '(내용 없음)',
         });
       } catch (err) {
         posts.push({ wrId, error: err.message });
@@ -698,7 +714,8 @@ async function nongraFetch(url, options = {}) {
   let res;
   try {
     res = await fetch(url, {
-      redirect: 'manual',
+      // 짧은 주소가 실제 글 주소로 이동(redirect)하는 사이트를 따라갑니다.
+      redirect: 'follow',
       ...options,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
@@ -725,6 +742,7 @@ async function nongraLogin() {
   });
   const res = await nongraFetch(`${n.base}/bbs/login_check.php`, {
     method: 'POST',
+    redirect: 'manual', // 로그인은 302 응답 자체로 성공을 판단합니다.
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
   });
@@ -1057,6 +1075,12 @@ async function pollNongra(force = false) {
     const listRes = await nongraFetch(nongraListUrl());
     const listHtml = await listRes.text();
     const wrIds = parseWrIds(listHtml, n.boTable);
+    // 설정할 때 붙여넣은 판매 페이지는 목록에 없어도 항상 맨 먼저 확인합니다.
+    if (n.wrId) {
+      const idx = wrIds.indexOf(n.wrId);
+      if (idx >= 0) wrIds.splice(idx, 1);
+      wrIds.unshift(n.wrId);
+    }
     if (!wrIds.length) throw httpError(502, '게시판에서 글을 찾지 못했습니다. 주소를 확인해 주세요.');
 
     // 최신 글들을 매번 다시 읽습니다. (수정·품절·판매 수량 변화를 따라잡기 위해)
