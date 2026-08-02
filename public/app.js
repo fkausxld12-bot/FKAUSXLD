@@ -676,9 +676,13 @@ $('#cancelSetup').addEventListener('click', () => $('#setup').classList.add('hid
 $('#saveNongra').addEventListener('click', async () => {
   const url = $('#nongraUrl').value.trim();
   const mbId = $('#nongraId').value.trim();
-  if (!url && !mbId) return toast('주문서 게시판 주소를 붙여넣어 주세요.', true);
+  if (!url && !mbId && !$('#nongraEditUrl').value.trim()) {
+    return toast('주문서 게시판 주소를 붙여넣어 주세요.', true);
+  }
   const body = {};
   if (url) body.url = url;
+  const editUrl = $('#nongraEditUrl').value.trim();
+  if (editUrl) body.editUrl = editUrl;
   if (mbId) {
     body.mbId = mbId;
     body.mbPw = $('#nongraPw').value;
@@ -690,6 +694,7 @@ $('#saveNongra').addEventListener('click', async () => {
   if (result) {
     $('#nongraUrl').value = '';
     $('#nongraPw').value = '';
+    $('#nongraEditUrl').value = '';
     $('#setup').classList.add('hidden');
   }
 });
@@ -751,6 +756,12 @@ $('#runDiag').addEventListener('click', async () => {
         text += `주소: ${d.editForm.url}\n응답: ${d.editForm.status} (${fmt(d.editForm.bytes)}바이트)\n`;
         text += `전송 주소(action): ${d.editForm.action}\n`;
         text += `입력 항목들: ${(d.editForm.fields || []).join(', ') || '없음'}\n`;
+        if (d.editForm.productRows && d.editForm.productRows.length) {
+          text += `상품 관련 칸:\n${d.editForm.productRows.map((r) => `  ${r}`).join('\n')}\n`;
+        }
+        if (d.editForm.productAround) {
+          text += `상품명 주변 원본 코드 (재고 차감 준비):\n${d.editForm.productAround}\n`;
+        }
       }
     }
     for (const p of d.posts) {
