@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v18'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v19'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -240,6 +240,20 @@ function addSalesDay(label, at, why) {
   if (db.salesDays.length > 60) db.salesDays.splice(0, db.salesDays.length - 60);
   logHistory('sale', `새 판매일 시작: ${clean}${why ? ` (${why})` : ''}`);
   save();
+}
+
+// "08월 03일" 같은 한국식 날짜를 판매일 라벨로 바꿉니다. (연말→연초 넘어감 처리)
+function labelFromKoreanDate(mm, dd) {
+  const now = new Date();
+  let year = now.getFullYear();
+  const cand = new Date(year, mm - 1, dd);
+  if (cand.getTime() < now.getTime() - 180 * 24 * 3600 * 1000) year += 1;
+  return `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+}
+
+function dateFromText(text) {
+  const m = String(text || '').match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  return m ? labelFromKoreanDate(Number(m[1]), Number(m[2])) : '';
 }
 
 // 주문이 속하는 판매일: 주문 시각 이전의 마지막 경계 라벨, 없으면 달력 날짜
@@ -1431,19 +1445,25 @@ async function pollNongra(force = false) {
     const wrIds = parseWrIds(listHtml, n.boTable);
 
     // 게시판에 새 판매글이 올라오면 자동으로 새 판매일을 시작합니다.
+    // 판매일 날짜는 ① 목록의 글 제목("08월 03일") ② 글 내용 ③ 다음날 순으로 정합니다.
     const listMax = wrIds.length ? Math.max(...wrIds) : 0;
     if (listMax && n.lastTopWrId && listMax > n.lastTopWrId) {
-      let label = ''; // 제목의 "08월 03일"에서 날짜를 읽고, 없으면 다음날로
-      try {
-        const { html: newPostHtml } = await nongraFetchPage(nongraPostUrl(listMax));
-        const tm = stripTags(newPostHtml).match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
-        if (tm) {
-          label = `${new Date().getFullYear()}-${String(tm[1]).padStart(2, '0')}-${String(tm[2]).padStart(2, '0')}`;
+      let label = '';
+      // ① 목록에서 새 글의 제목을 찾아 날짜를 읽습니다. (추가 요청 없이)
+      const titleLink = findLinks(listHtml).find((l) =>
+        new RegExp(`(?:wr_id=|/${n.boTable}/)${listMax}(?:[^0-9]|$)`).test(l.href));
+      if (titleLink) label = dateFromText(titleLink.text);
+      // ② 없으면 글 내용에서 찾습니다.
+      if (!label) {
+        try {
+          const { html: newPostHtml } = await nongraFetchPage(nongraPostUrl(listMax));
+          label = dateFromText(stripTags(newPostHtml).slice(0, 3000));
+        } catch {
+          /* 못 읽으면 기본값(다음날) */
         }
-      } catch {
-        /* 제목을 못 읽으면 기본값(다음날) 사용 */
       }
-      addSalesDay(label, new Date().toISOString(), `새 판매글 #${listMax} 감지`);
+      addSalesDay(label, new Date().toISOString(),
+        `새 판매글 #${listMax}${titleLink && titleLink.text ? ` "${titleLink.text.slice(0, 30)}"` : ''} 감지`);
     }
     if (listMax) {
       n.lastTopWrId = Math.max(n.lastTopWrId || 0, listMax);
