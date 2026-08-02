@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v16'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v17'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -1052,37 +1052,85 @@ function parseSiteOrders(html) {
     String(html)
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
-      // 상태 드롭다운에서 선택 안 된 항목은 지워서 실제 상태만 남깁니다.
       .replace(/<option(?![^>]*selected)[^>]*>[\s\S]*?<\/option>/gi, ''),
   );
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  const STATUS_WORDS = /입금완료|입금대기|결제완료|주문완료|발송완료|배송완료|주문취소|취소/;
+
   const entries = [];
   let cur = null;
+  let preamble = []; // 주문 카드 상단(날짜 줄 위)에 나오는 총액·운송장 정보
+  const pushCur = () => {
+    if (cur) entries.push(cur);
+    cur = null;
+  };
 
   for (const line of lines) {
-    // 날짜가 줄 어디에 있어도 주문의 시작으로 인정합니다.
-    const start = line.match(/(\d{2}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
+    // "26-08-02 19:02" 형태의 날짜 줄이 주문의 시작입니다. ("일시 :" 줄은 제외)
+    const start = !/일시/.test(line) && line.match(/(\d{2}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
     if (start) {
-      if (cur) entries.push(cur);
+      pushCur();
+      // 카드 상단 정보: 운송장 번호가 실제로 있으면 발송완료입니다.
+      // ("택배발송" 같은 상태 후보 단어는 모든 카드에 있으므로 근거로 쓰지 않습니다)
+      const shipped = preamble.some((l) => /invno|tracking|운송장\s*[:번]/.test(l))
+        || preamble.some((l) => /^\d{10,13}$/.test(l));
+      let preTotal = 0;
+      for (const l of preamble) {
+        const t = l.match(/^([\d,]{4,})\s*원\s*$/);
+        if (t) preTotal = num(t[1]);
+      }
       cur = {
         orderNo: (line.match(/\b(\d{6,})\b/) || [])[1] || '',
         date: start[1],
         time: start[2],
-        status: (line.match(STATUS_WORDS) || [])[0] || '',
+        dateFull: '',
+        status: shipped ? '택배발송' : '',
         buyer: '',
         phone: '',
         address: '',
         items: [],
-        total: 0,
+        total: preTotal,
+        shipping: 0,
+        payTotal: 0,
       };
+      preamble = [];
       continue;
     }
-    if (!cur) continue;
+    if (!cur) {
+      preamble.push(line);
+      continue;
+    }
 
-    if (!cur.status) {
-      const st = line.match(STATUS_WORDS);
-      if (st) cur.status = st[0];
+    // 주문번호가 자기 줄에 따로 있는 형식
+    if (!cur.orderNo) {
+      const om = line.match(/^(\d{6,})$/);
+      if (om) {
+        cur.orderNo = om[1];
+        continue;
+      }
+    }
+
+    // "일시 : 2026-08-02 19:02:12" 가 나오면 이 주문 카드는 끝
+    const timeM = line.match(/일시\s*:\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
+    if (timeM) {
+      cur.dateFull = timeM[1];
+      cur.time = timeM[2];
+      pushCur();
+      continue;
+    }
+
+    const shipM = line.match(/택배요금\s*:\s*([\d,]+)/);
+    if (shipM) {
+      cur.shipping = num(shipM[1]);
+      continue;
+    }
+    const payM = line.match(/총결제요금\s*:\s*([\d,]+)/);
+    if (payM) {
+      cur.payTotal = num(payM[1]);
+      continue;
+    }
+    if (/운송장|invno|tracking/.test(line)) {
+      cur.status = '택배발송';
+      continue;
     }
 
     const phoneM = line.match(/(01[016789])[-\s.]?(\d{3,4})[-\s.]?(\d{4})/);
@@ -1111,13 +1159,14 @@ function parseSiteOrders(html) {
     const totalM = line.match(/^([\d,]{4,})\s*원\s*$/);
     if (totalM) cur.total = num(totalM[1]);
   }
-  if (cur) entries.push(cur);
+  pushCur();
   return entries.filter((e) => e.orderNo && e.items.length);
 }
 
 const SITE_STATUS_MAP = {
-  주문완료: 'new', 입금대기: 'new', 입금완료: 'paid', 결제완료: 'paid',
-  발송완료: 'shipped', 배송완료: 'shipped', 주문취소: 'canceled', 취소: 'canceled',
+  주문완료: 'new', 입금대기: 'new', 입금완료: 'paid', 결제완료: 'paid', 상품준비중: 'paid',
+  택배발송: 'shipped', 발송완료: 'shipped', 배송완료: 'shipped', 구매확정: 'shipped',
+  주문취소: 'canceled', 취소: 'canceled',
 };
 const STATUS_RANK = { new: 0, paid: 1, ready: 2, shipped: 3 };
 
@@ -1138,12 +1187,16 @@ function applySiteOrders(entries) {
       qty: it.qty,
       price: it.amount || unitPriceOf(it.name) * it.qty,
     }));
-    // 품목별 가격을 모르면 주문 합계를 첫 품목에 담아 총액을 보존합니다.
-    if (items.length && items.every((i) => !i.price) && e.total) items[0].price = e.total;
+    // 배송비를 뺀 물품 금액: 총결제요금 - 택배요금 (없으면 표시된 총액 - 택배요금)
+    const goodsTotal = Math.max(0, (e.payTotal || e.total || 0) - (e.shipping || 0));
+    // 품목별 가격을 모르면 물품 합계를 첫 품목에 담아 총액을 보존합니다.
+    if (items.length && items.every((i) => !i.price) && goodsTotal) items[0].price = goodsTotal;
 
     const siteStatus = SITE_STATUS_MAP[e.status] || 'new';
     const createdAt = (() => {
-      const d = new Date(`20${e.date}T${e.time}:00`);
+      const d = e.dateFull
+        ? new Date(`${e.dateFull}T${e.time}:00`)
+        : new Date(`20${e.date}T${e.time}:00`);
       return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
     })();
 
@@ -1209,12 +1262,37 @@ function applySiteOrders(entries) {
  */
 function parseNongraProducts(html) {
   const products = [];
-  const re = /재고\s*:\s*(\d+)\s*개[\s\S]{0,120}?class="fr won">([\d,]+)원</g;
+
+  // 방식 1 (정확): 숨은 입력값에 상품명·번호·총수량이 들어 있습니다.
+  // <input ... attr-cont='장미)원탑(sp)' ... data-idx1="1988817" data-idx2="16">
+  const reInput = /attr-cont=['"]([^'"]+)['"][\s\S]{0,250}?data-idx1="(\d+)"[^>]*data-idx2="(\d+)"/g;
   let m;
+  while ((m = reInput.exec(html))) {
+    const name = m[1].trim();
+    const optionId = m[2];
+    const totalQty = Number(m[3]);
+    if (!name || products.some((p) => p.name === name)) continue;
+    // 가격은 수량 버튼의 quantity(-1, 번호, 가격) 호출에서 얻습니다.
+    const priceM = html.match(new RegExp(`quantity\\(-?1,\\s*${optionId},\\s*(\\d+)`));
+    products.push({
+      name,
+      price: priceM ? Number(priceM[1]) : 0,
+      stock: totalQty,
+      progress: 0,
+      sold: 0,
+      approx: true, // 실시간 조회 전까지는 대략치
+      optionId,
+      totalParam: totalQty, // 실시간 조회의 total 인자
+    });
+  }
+  if (products.length >= 2) return products;
+
+  // 방식 2 (예비): 주석 속 재고 + fr won 가격 + 직전 텍스트 상품명
+  products.length = 0;
+  const re = /재고\s*:\s*(\d+)\s*개[\s\S]{0,120}?class="fr won">([\d,]+)원</g;
   while ((m = re.exec(html))) {
     const stock = Number(m[1]);
     const price = num(m[2]);
-    // 이 블록 앞 500자 안에서 상품명으로 보이는 마지막 텍스트 조각을 찾습니다.
     const before = html.slice(Math.max(0, m.index - 500), m.index);
     const texts = [...before.matchAll(/>([^<>\n]{2,40})</g)]
       .map((x) => x[1].trim())
@@ -1223,21 +1301,13 @@ function parseNongraProducts(html) {
         && !/재고|용량|수량|원$|선택|합계|배송|주문|판매중|품절/.test(t)
         && !/^[-–—>]+$/.test(t));
     const name = texts.length ? texts[texts.length - 1] : '';
-    if (!name) continue;
-    if (products.some((p) => p.name === name)) continue;
-
-    // 이 상품의 실시간 조회에 쓰이는 번호: quantity(-1, 1988817, 8000)의 1988817
+    if (!name || products.some((p) => p.name === name)) continue;
     const after = html.slice(m.index, m.index + 500);
     const idm = after.match(/quantity\(-?1,\s*(\d+)/);
-
     products.push({
-      name,
-      price,
-      stock,
-      progress: 0,
-      sold: 0,
-      approx: true, // 실시간 조회 전까지는 대략치
+      name, price, stock, progress: 0, sold: 0, approx: true,
       optionId: idm ? idm[1] : '',
+      totalParam: stock,
     });
   }
   return products;
@@ -1254,7 +1324,7 @@ async function enrichLiveCounts(widget, wrId) {
     if (!p.optionId) continue;
     try {
       const res = await nongraFetch(
-        `${cntUrl}?total=1&idx=${p.optionId}&wr_id=${wrId}&bo_table=${encodeURIComponent(n.boTable)}`,
+        `${cntUrl}?total=${p.totalParam || p.stock || 1}&idx=${p.optionId}&wr_id=${wrId}&bo_table=${encodeURIComponent(n.boTable)}`,
       );
       const parts = (await res.text()).trim().split('_').map((x) => parseInt(x, 10));
       if (parts.length >= 3 && parts.every((v) => Number.isFinite(v))) {
