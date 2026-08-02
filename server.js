@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v21'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v22'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -1191,6 +1191,15 @@ function parseSalesWidget(html) {
  *   장미)비포썬셋(sp) (1 개)
  *   22,000 원
  */
+// 운송장(송장번호)이 붙었는지 판별합니다. 전화번호(01x…)는 제외합니다.
+function isTrackingLine(line) {
+  if (/invno|tracking|운송장\s*[:번]/.test(line)) return true;
+  if (/(롯데|cj\s?대한통운|한진|로젠|우체국|경동|천일|합동)\s*택배/i.test(line)) return true;
+  // 숫자만 있는 10~13자리 줄 = 송장번호 (010/011… 전화번호는 제외)
+  const m = line.match(/^(\d{10,13})$/);
+  return Boolean(m && !/^01[016789]/.test(m[1]));
+}
+
 function parseSiteOrders(html) {
   const text = stripTags(
     String(html)
@@ -1215,8 +1224,7 @@ function parseSiteOrders(html) {
       pushCur();
       // 카드 상단 정보: 운송장 번호가 실제로 있으면 발송완료입니다.
       // ("택배발송" 같은 상태 후보 단어는 모든 카드에 있으므로 근거로 쓰지 않습니다)
-      const shipped = preamble.some((l) => /invno|tracking|운송장\s*[:번]/.test(l))
-        || preamble.some((l) => /^\d{10,13}$/.test(l));
+      const shipped = preamble.some((l) => isTrackingLine(l));
       let preTotal = 0;
       for (const l of preamble) {
         const t = l.match(/^([\d,]{4,})\s*원\s*$/);
@@ -1244,9 +1252,9 @@ function parseSiteOrders(html) {
       continue;
     }
 
-    // 주문번호가 자기 줄에 따로 있는 형식
+    // 주문번호가 자기 줄에 따로 있는 형식 (6~9자리 - 10자리 이상은 송장번호)
     if (!cur.orderNo) {
-      const om = line.match(/^(\d{6,})$/);
+      const om = line.match(/^(\d{6,9})$/);
       if (om) {
         cur.orderNo = om[1];
         continue;
@@ -1272,7 +1280,8 @@ function parseSiteOrders(html) {
       cur.payTotal = num(payM[1]);
       continue;
     }
-    if (/운송장|invno|tracking/.test(line)) {
+    // 카드 안쪽 어디에 있어도 송장번호가 보이면 발송완료로 표시합니다.
+    if (isTrackingLine(line)) {
       cur.status = '택배발송';
       continue;
     }
