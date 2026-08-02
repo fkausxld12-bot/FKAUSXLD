@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v12'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v13'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -64,6 +64,7 @@ const emptyDb = () => ({
     wrId: 0, // 고정 글 번호 (followLatest=false일 때만 사용)
     followLatest: true, // 항상 게시판의 최신 글을 추적
     short: false, // 짧은 주소(/게시판코드/글번호) 형식 사이트인지
+    orderPageUrl: '', // 판매자용 주문배송 페이지 (자동 발견)
     mbId: '', // 사이트 로그인 아이디 (비밀댓글 보기용, 선택)
     mbPw: '',
     processed: {}, // 처리한 댓글 key → 주문 id 또는 'skipped'
@@ -495,12 +496,21 @@ const routes = {
     for (const wrId of targets) {
       try {
         const { res, html, frames } = await nongraFetchPage(nongraPostUrl(wrId));
+        discoverOrderPage(html, res.url || nongraPostUrl(wrId));
         const widget = parseSalesWidget(html);
         const siteOrders = parseSiteOrders(html);
         const p = parseOrderPost(html, wrId);
         const fullText = stripTags(
           html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
         );
+
+        // "재고"라는 글자가 원본 코드 어디에, 어떤 모양으로 있는지 그대로 보여줍니다.
+        const stockSpots = [];
+        let idx = -1;
+        while (stockSpots.length < 2 && (idx = html.indexOf('재고', idx + 1)) >= 0) {
+          stockSpots.push(html.slice(Math.max(0, idx - 120), idx + 280).replace(/\s+/g, ' '));
+        }
+
         posts.push({
           wrId,
           status: res.status,
@@ -514,17 +524,40 @@ const routes = {
           siteOrders: siteOrders.length,
           orderSample: siteOrders.slice(0, 2).map((o) => `${o.orderNo} ${o.buyer} ${o.items.map((i) => `${i.name} ${i.qty}개`).join(',')}`),
           bodyItemsFound: p.items.length,
-          textPreview: fullText.slice(0, 600) || '(내용 없음)',
+          stockSpots,
+          textPreview: fullText.slice(0, 400) || '(내용 없음)',
         });
       } catch (err) {
         posts.push({ wrId, error: err.message });
       }
     }
+    // 주문배송 페이지가 발견됐으면 그 페이지도 진단합니다.
+    let orderPage = null;
+    if (db.nongra.orderPageUrl) {
+      try {
+        const { html: oh } = await nongraFetchPage(db.nongra.orderPageUrl);
+        const found = parseSiteOrders(oh);
+        const otext = stripTags(
+          oh.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
+        );
+        orderPage = {
+          url: db.nongra.orderPageUrl,
+          bytes: oh.length,
+          orders: found.length,
+          sample: found.slice(0, 2).map((o) => `${o.orderNo} ${o.buyer} ${o.items.map((i) => `${i.name} ${i.qty}개`).join(',')}`),
+          textPreview: otext.slice(0, 500),
+        };
+      } catch (err) {
+        orderPage = { url: db.nongra.orderPageUrl, error: err.message };
+      }
+    }
+
     return {
       loggedIn: nongraCache.loggedIn,
       listStatus: listRes.status,
       listSize: listHtml.length,
       foundPostIds: wrIds,
+      orderPage,
       posts,
     };
   },
@@ -732,6 +765,34 @@ async function nongraFetch(url, options = {}) {
   }
   nongraStoreCookies(res);
   return res;
+}
+
+// 페이지 안의 모든 링크(주소+글자)를 뽑습니다. "주문배송" 메뉴를 찾는 데 씁니다.
+function findLinks(html) {
+  const out = [];
+  const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && out.length < 400) {
+    out.push({ href: m[1], text: stripTags(m[2]).replace(/\s+/g, ' ').trim() });
+  }
+  return out;
+}
+
+// 페이지에서 판매자용 "주문배송/주문내역" 메뉴 주소를 찾아 기억해 둡니다.
+function discoverOrderPage(html, baseUrl) {
+  if (db.nongra.orderPageUrl) return;
+  const link = findLinks(html).find((l) => /주문배송|주문내역|주문관리/.test(l.text));
+  if (!link) return;
+  try {
+    const abs = new URL(link.href, baseUrl);
+    if (abs.host === new URL(db.nongra.base).host) {
+      db.nongra.orderPageUrl = abs.toString();
+      logHistory('order', `농라F 주문배송 페이지 발견: ${abs.pathname}`);
+      save();
+    }
+  } catch {
+    /* 잘못된 링크는 무시 */
+  }
 }
 
 /**
@@ -1124,7 +1185,8 @@ async function pollNongra(force = false) {
     const posts = [];
     for (const wrId of wrIds.slice(0, 10)) {
       try {
-        const { html } = await nongraFetchPage(nongraPostUrl(wrId));
+        const { res: pageRes, html } = await nongraFetchPage(nongraPostUrl(wrId));
+        discoverOrderPage(html, pageRes.url || nongraPostUrl(wrId)); // 주문배송 메뉴 자동 발견
 
         // ① 상품 선택표가 있으면 = 판매 페이지 → 상품·재고·판매 수량 동기화
         //    (주문보다 먼저 읽어야 품목별 개당 가격을 매칭할 수 있습니다)
@@ -1145,6 +1207,17 @@ async function pollNongra(force = false) {
     }
 
     // 주문서 후보만 남깁니다: 품목이 읽힌 글 + 아직 못 여는 비밀글
+    // 판매자용 주문배송 페이지가 발견되어 있으면 거기서도 주문을 읽습니다.
+    if (db.nongra.orderPageUrl) {
+      try {
+        const { html: orderHtml } = await nongraFetchPage(db.nongra.orderPageUrl);
+        const adminOrders = parseSiteOrders(orderHtml);
+        if (adminOrders.length) applySiteOrders(adminOrders);
+      } catch {
+        /* 주문배송 페이지 일시 오류는 다음 확인 때 재시도 */
+      }
+    }
+
     nongraCache.inbox = posts.filter((p) => p.items.length > 0 || p.secret);
     nongraCache.fetchedAt = new Date().toISOString();
     nongraCache.error = '';

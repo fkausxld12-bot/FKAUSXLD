@@ -473,6 +473,18 @@ $('#runDiag').addEventListener('click', async () => {
     let text = `로그인: ${d.loggedIn ? '됨' : '안 됨'}\n`;
     text += `게시판 목록 응답: ${d.listStatus} (${fmt(d.listSize)}바이트)\n`;
     text += `발견한 글 번호: ${d.foundPostIds.join(', ') || '없음 ← 주소가 맞는지 확인'}\n`;
+    if (d.orderPage) {
+      text += `\n===== 주문배송 페이지 =====\n주소: ${d.orderPage.url}\n`;
+      if (d.orderPage.error) {
+        text += `오류: ${d.orderPage.error}\n`;
+      } else {
+        text += `응답: ${fmt(d.orderPage.bytes)}바이트 · 읽은 주문: ${d.orderPage.orders}건\n`;
+        if (d.orderPage.sample && d.orderPage.sample.length) text += `주문 예시: ${d.orderPage.sample.join(' | ')}\n`;
+        text += `내용 미리보기:\n${d.orderPage.textPreview}\n`;
+      }
+    } else {
+      text += '\n(주문배송 페이지를 아직 찾지 못했습니다)\n';
+    }
     for (const p of d.posts) {
       text += `\n───── 글 #${p.wrId} ─────\n`;
       if (p.error) {
@@ -484,6 +496,12 @@ $('#runDiag').addEventListener('click', async () => {
       text += `상품표: ${p.widgetProducts}개 · 주문내역: ${p.siteOrders}건 · 본문품목: ${p.bodyItemsFound}개 · 비밀글: ${p.secret ? '예' : '아니오'}\n`;
       if (p.widgetSample && p.widgetSample.length) text += `상품 예시: ${p.widgetSample.join(' | ')}\n`;
       if (p.orderSample && p.orderSample.length) text += `주문 예시: ${p.orderSample.join(' | ')}\n`;
+      if (p.stockSpots && p.stockSpots.length) {
+        text += `"재고" 글자 주변 원본 코드 (상품표 형식 확인용):\n`;
+        p.stockSpots.forEach((s, i) => { text += `[${i + 1}] ${s}\n`; });
+      } else if (!p.error) {
+        text += '(이 페이지 원본에 "재고"라는 글자가 없습니다)\n';
+      }
       text += `페이지 내용 미리보기:\n${p.textPreview}\n`;
     }
     text += '\n※ 이 화면을 캡처해서 보내주시면 사이트에 맞게 조정해 드릴 수 있습니다.';
