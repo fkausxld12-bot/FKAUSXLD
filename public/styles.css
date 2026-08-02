@@ -184,6 +184,7 @@ textarea { width: 100%; resize: vertical; }
 .note { font-size: 12.5px; color: var(--muted); margin: 0 4px 16px; }
 .empty { padding: 22px 16px; margin: 0; color: var(--muted); font-size: 13.5px; text-align: center; }
 .hint { margin: 0 0 8px; font-size: 12.5px; color: var(--muted); }
+.hint.pad-h { padding: 10px 16px; margin: 0; border-bottom: 1px solid var(--line); }
 .hint code { background: var(--bg); padding: 1px 5px; border-radius: 5px; }
 
 .adder { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--brand-soft); }
