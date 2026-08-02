@@ -274,10 +274,13 @@ function renderOrders() {
       actions.appendChild(toolBtn('✓ 완료', () =>
         act(() => api(`/api/orders/${order.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'shipped' }) }),
           `#${order.no} 완료 처리`)));
+    }
+    // 현장 판매는 실수했을 때 언제든 취소(수량 복구) 가능
+    if (order.status !== 'canceled' && (order.status !== 'shipped' || order.channel === 'field')) {
       actions.appendChild(toolBtn('취소', () =>
-        confirm(`주문 #${order.no}을(를) 취소할까요?`) &&
+        confirm(`주문 #${order.no}을(를) 취소할까요? 수량이 다시 더해집니다.`) &&
         act(() => api(`/api/orders/${order.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'canceled' }) }),
-          '취소했습니다.'), true));
+          '취소했습니다. 수량이 복구됐습니다.'), true));
     }
     actions.appendChild(toolBtn('삭제', () =>
       confirm(`주문 #${order.no} 기록을 삭제할까요?`) &&
@@ -301,63 +304,91 @@ function toolBtn(label, onClick, danger) {
 
 let saleCart = []; // { name, qty, unit }
 
-function renderSaleGrid() {
-  const grid = $('#saleGrid');
-  grid.innerHTML = '';
-  for (const p of learnedProducts().slice(0, 16)) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'product-btn';
-    b.innerHTML = `
-      <span class="p-name">${escapeHtml(p.name)}</span>
-      <span class="p-price">${p.unit ? won(p.unit) : '가격 직접 입력'}</span>`;
-    b.addEventListener('click', () => addToSale(p.name, p.unit));
-    grid.appendChild(b);
+// 농라F 판매 페이지의 상품 목록이 있으면 그대로 보여주고, 없으면 주문에서 배운 목록 사용
+function saleProducts() {
+  const site = ((state.nongra || {}).sales || {}).products || [];
+  if (site.length) {
+    return site.map((p) => ({
+      name: p.name,
+      unit: p.price,
+      stock: p.stock,
+      progress: p.progress,
+      sold: p.sold,
+      fromSite: true,
+    }));
   }
+  return learnedProducts().slice(0, 20).map((p) => ({ name: p.name, unit: p.unit, fromSite: false }));
 }
 
-function addToSale(name, unit) {
-  if (!unit) {
+function saleQtyOf(name) {
+  const line = saleCart.find((c) => c.name === name);
+  return line ? line.qty : 0;
+}
+
+function changeSaleQty(name, unit, delta, maxStock) {
+  let line = saleCart.find((c) => c.name === name);
+  const next = (line ? line.qty : 0) + delta;
+  if (next < 0) return;
+  if (maxStock !== undefined && next > maxStock) {
+    return toast(`재고가 ${maxStock}개뿐입니다.`, true);
+  }
+  if (!unit && delta > 0 && !line) {
     const input = prompt(`"${name}" 개당 가격(원)을 입력해 주세요.`, '');
     if (input === null) return;
     unit = Number(String(input).replace(/[^\d]/g, '')) || 0;
     if (!unit) return toast('가격을 확인해 주세요.', true);
   }
-  const line = saleCart.find((c) => c.name === name);
-  if (line) line.qty += 1;
-  else saleCart.push({ name, qty: 1, unit });
-  renderSaleCart();
+  if (!line && next > 0) {
+    line = { name, qty: 0, unit };
+    saleCart.push(line);
+  }
+  if (line) {
+    line.qty = next;
+    if (line.qty === 0) saleCart = saleCart.filter((c) => c !== line);
+  }
+  renderSaleGrid();
 }
 
-function renderSaleCart() {
-  const list = $('#saleCart');
+function addToSale(name, unit) {
+  changeSaleQty(name, unit, +1);
+}
+
+// 농라F 페이지와 같은 모양: 상품명·가격 | [재고/진행/판매] | − 수량 +
+function renderSaleGrid() {
+  const list = $('#saleList');
   list.innerHTML = '';
+  const products = saleProducts();
+  $('#emptySale').classList.toggle('hidden', products.length > 0);
 
-  for (const line of saleCart) {
+  // 사이트에 없는 직접 입력 품목도 표시되도록 합칩니다.
+  const extra = saleCart.filter((c) => !products.some((p) => p.name === c.name))
+    .map((c) => ({ name: c.name, unit: c.unit, fromSite: false }));
+
+  for (const p of [...products, ...extra]) {
+    const qty = saleQtyOf(p.name);
+    const soldOut = p.fromSite && p.stock === 0;
+
     const li = document.createElement('li');
+    li.className = 'item' + (soldOut ? ' soldout' : '');
 
-    const name = document.createElement('span');
-    name.className = 'c-name';
-    name.innerHTML = `${escapeHtml(line.name)}<span class="c-sub">개당 ${won(line.unit)}</span>`;
+    const info = document.createElement('div');
+    info.className = 'item-info';
+    const sub = p.fromSite
+      ? `${won(p.unit)} · 재고:${fmt(p.stock)} 진행:${fmt(p.progress)} 판매:${fmt(p.sold)}`
+      : (p.unit ? won(p.unit) : '가격 직접 입력');
+    info.innerHTML = `
+      <div class="item-name">${escapeHtml(p.name)}${soldOut ? ' <span class="chip soldout-chip">품절</span>' : ''}</div>
+      <div class="item-sub">${escapeHtml(sub)}</div>`;
 
-    const minus = stepBtn('−', 'step', () => {
-      line.qty -= 1;
-      if (line.qty <= 0) saleCart = saleCart.filter((c) => c !== line);
-      renderSaleCart();
-    });
-    const qty = document.createElement('span');
-    qty.className = 'c-qty';
-    qty.textContent = line.qty;
-    const plus = stepBtn('＋', 'step plus', () => {
-      line.qty += 1;
-      renderSaleCart();
-    });
+    const minus = stepBtn('−', 'step', () => changeSaleQty(p.name, p.unit, -1));
+    const count = document.createElement('span');
+    count.className = 'c-qty';
+    count.textContent = qty;
+    const plus = stepBtn('＋', 'step plus', () =>
+      changeSaleQty(p.name, p.unit, +1, p.fromSite ? p.stock : undefined));
+    plus.disabled = soldOut;
 
-    const price = document.createElement('span');
-    price.className = 'c-price';
-    price.textContent = won(line.qty * line.unit);
-
-    li.append(name, minus, qty, plus, price);
+    li.append(info, minus, count, plus);
     list.appendChild(li);
   }
 
@@ -387,7 +418,7 @@ $('#customAdd').addEventListener('click', () => {
 
 $('#clearSale').addEventListener('click', () => {
   saleCart = [];
-  renderSaleCart();
+  renderSaleGrid();
 });
 
 $('#saleSubmit').addEventListener('click', async () => {
@@ -401,8 +432,8 @@ $('#saleSubmit').addEventListener('click', async () => {
   }));
   if (result) {
     saleCart = [];
-    renderSaleCart();
-    toast(`현장 판매 ${won(total)} 등록! 수량에 바로 반영됐습니다.`);
+    renderSaleGrid();
+    toast(`현장 판매 ${won(total)} 등록! 실수했으면 주문 목록에서 취소할 수 있습니다.`);
   }
 });
 
