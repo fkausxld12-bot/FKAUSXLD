@@ -178,6 +178,7 @@ function renderSummary() {
 function renderNongraStatus() {
   const n = state.nongra || {};
   const el = $('#nongraStatus');
+  if (state.version) $('#connText').textContent = `연결됨 · ${state.version}`;
   if (!n.configured) {
     el.textContent = '아직 연동 전입니다. [설정]을 눌러 농라F 주문서 게시판 주소를 저장해 주세요.';
     return;
@@ -478,7 +479,7 @@ $('#runDiag').addEventListener('click', async () => {
         text += `오류: ${p.error}\n`;
         continue;
       }
-      text += `응답: ${p.status} (${fmt(p.bytes)}바이트) · 제목: ${p.title}\n`;
+      text += `응답: ${p.status} (${fmt(p.bytes)}바이트) · iframe: ${p.frames || 0}개 · 제목: ${p.title}\n`;
       if (p.finalUrl) text += `실제 주소: ${p.finalUrl}\n`;
       text += `상품표: ${p.widgetProducts}개 · 주문내역: ${p.siteOrders}건 · 본문품목: ${p.bodyItemsFound}개 · 비밀글: ${p.secret ? '예' : '아니오'}\n`;
       if (p.widgetSample && p.widgetSample.length) text += `상품 예시: ${p.widgetSample.join(' | ')}\n`;
