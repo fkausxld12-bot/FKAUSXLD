@@ -6,7 +6,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-let state = { orders: [], nongra: {} };
+let state = { orders: [], nongra: {}, store: {} };
 let toastTimer = null;
 let prevNewCount = null; // 새 주문 알림용
 
@@ -106,9 +106,25 @@ function orderTotal(order) {
 function render() {
   renderSummary();
   renderNongraStatus();
+  renderStoreStatus();
   renderQty();
   renderOrders();
   renderSaleGrid();
+}
+
+function renderStoreStatus() {
+  const s = state.store || {};
+  const el = $('#storeStatus');
+  if (!s.configured) {
+    el.textContent = '아직 연동 전입니다. [설정]에서 애플리케이션 ID/시크릿을 저장하면 결제된 주문이 자동으로 들어옵니다.';
+  } else if (!s.ready) {
+    el.textContent = '⚠ 연동 부품이 설치되지 않았습니다. 시작하기.bat을 다시 실행해 주세요.';
+  } else {
+    const parts = ['연동 중 · 5분마다 결제된 주문을 자동으로 가져옵니다'];
+    if (s.fetchedAt) parts.push(`마지막 확인 ${timeText(s.fetchedAt)}`);
+    if (s.error) parts.push(`⚠ ${s.error}`);
+    el.textContent = parts.join(' · ');
+  }
 }
 
 // 배송비·포장 같은 항목은 꽃 품목이 아니므로 집계·가격 학습에서 뺍니다.
@@ -450,6 +466,35 @@ $('#nongraNow').addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = '확인 중…';
   await act(() => api('/api/nongra/refresh', { method: 'POST', body: '{}' }), '방금 확인했습니다.');
+  btn.disabled = false;
+  btn.textContent = '↻ 지금 확인';
+});
+
+/* ------------------------------------------------------------ 스토어 연동 */
+
+$('#toggleStoreSetup').addEventListener('click', () => $('#storeSetup').classList.toggle('hidden'));
+$('#cancelStoreSetup').addEventListener('click', () => $('#storeSetup').classList.add('hidden'));
+
+$('#saveStore').addEventListener('click', async () => {
+  const clientId = $('#storeId').value.trim();
+  const clientSecret = $('#storeSecret').value.trim();
+  if (!clientId || !clientSecret) return toast('애플리케이션 ID와 시크릿을 모두 붙여넣어 주세요.', true);
+  const result = await act(
+    () => api('/api/store/settings', { method: 'POST', body: JSON.stringify({ clientId, clientSecret }) }),
+    '스토어 연동 완료! 결제된 주문을 자동으로 가져옵니다.',
+  );
+  if (result) {
+    $('#storeId').value = '';
+    $('#storeSecret').value = '';
+    $('#storeSetup').classList.add('hidden');
+  }
+});
+
+$('#storeNow').addEventListener('click', async () => {
+  const btn = $('#storeNow');
+  btn.disabled = true;
+  btn.textContent = '확인 중…';
+  await act(() => api('/api/store/refresh', { method: 'POST', body: '{}' }), '방금 확인했습니다.');
   btn.disabled = false;
   btn.textContent = '↻ 지금 확인';
 });

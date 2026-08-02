@@ -1,0 +1,13 @@
+{
+  "name": "flower-workshop-orders",
+  "version": "1.0.0",
+  "private": true,
+  "description": "꽃 작업장 주문 관리",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3"
+  }
+}

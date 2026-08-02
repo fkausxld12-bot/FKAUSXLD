@@ -14,6 +14,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
+if not exist "node_modules\bcryptjs" (
+  echo Installing components... please wait.
+  call npm install --no-audit --no-fund
+)
+
 start "" http://localhost:4000
 node server.js
 pause
