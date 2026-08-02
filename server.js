@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v23'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v24'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -73,6 +73,8 @@ const emptyDb = () => ({
   },
   // 판매일(장) 경계: 새 발송글 기준으로 매출 날짜를 나눕니다.
   salesDays: [], // [{ id, at, label: 'YYYY-MM-DD' }]
+  // 문자 주문 안내 문구 설정
+  smsInfo: { account: '' }, // 입금 계좌 문구 (예: 농협 000-000 명정원예)
   // 스마트스토어(네이버 커머스 API) 연동 설정
   store: {
     clientId: '', // 애플리케이션 ID
@@ -95,6 +97,7 @@ function loadDb() {
       history: Array.isArray(raw.history) ? raw.history : [],
       orderSeq: Number(raw.orderSeq) || 0,
       salesDays: Array.isArray(raw.salesDays) ? raw.salesDays : [],
+      smsInfo: { ...base.smsInfo, ...(raw.smsInfo || {}) },
       nongra: {
         ...base.nongra,
         ...(raw.nongra || {}),
@@ -337,6 +340,7 @@ const routes = {
         : '',
     },
     store: storePublic(),
+    smsAccount: db.smsInfo.account,
     salesDays: db.salesDays.slice(-5),
     currentLabel: currentSalesLabel(),
     salesSummary: salesSummary(),
@@ -763,6 +767,59 @@ const routes = {
     if (!key) throw httpError(400, '댓글 정보가 없습니다.');
     db.nongra.processed[key] = db.nongra.processed[key] || 'skipped';
     return { ok: true };
+  },
+
+  /* ---------- 문자 주문 ---------- */
+
+  'POST /api/sms-account': (body) => {
+    db.smsInfo.account = String(body.account || '').trim();
+    return { account: db.smsInfo.account };
+  },
+
+  // 문자 주문 등록: 배송비 자동 계산(10만원 미만 4,000원) + 안내 문구 생성
+  'POST /api/sms-order': (body) => {
+    const items = normalizeOrderItems(body.items);
+    if (!items.length) throw httpError(400, '품목을 담아 주세요.');
+    for (const it of items) {
+      if (!it.price) {
+        const unit = salesUnitPriceOf(it.name);
+        if (unit) it.price = unit * it.qty;
+      }
+    }
+
+    const goodsTotal = items.reduce((s, it) => s + it.price, 0);
+    const shippingFee = goodsTotal >= 100000 ? 0 : 4000; // 사이트 규칙: 10만원 이상 무료배송
+    const payTotal = goodsTotal + shippingFee;
+
+    db.orderSeq += 1;
+    const order = {
+      id: nextId(),
+      no: db.orderSeq,
+      channel: 'sms',
+      buyer: String(body.buyer || '').trim(),
+      phone: String(body.phone || '').trim(),
+      address: String(body.address || '').trim(),
+      memo: `문자 주문 · 입금 ${payTotal.toLocaleString('ko-KR')}원 (배송비 ${shippingFee.toLocaleString('ko-KR')}원 포함)`,
+      items,
+      status: 'paid',
+      createdAt: new Date().toISOString(),
+      shippedAt: null,
+      printedAt: null,
+    };
+    db.orders.unshift(order);
+    logHistory('order', `문자 주문 #${order.no} 등록 (${order.buyer}) - 입금 ${payTotal.toLocaleString('ko-KR')}원`);
+
+    // 손님에게 보낼 안내 문구
+    const lines = [
+      '[명정원예] 주문 확인 문자입니다 🌸',
+      ...items.map((it) => `· ${it.name} ${it.qty}개 ${it.price.toLocaleString('ko-KR')}원`),
+      `물품 ${goodsTotal.toLocaleString('ko-KR')}원 + 배송비 ${shippingFee ? shippingFee.toLocaleString('ko-KR') + '원' : '무료'}`,
+      `입금하실 금액: ${payTotal.toLocaleString('ko-KR')}원`,
+    ];
+    if (db.smsInfo.account) lines.push(`입금 계좌: ${db.smsInfo.account}`);
+    lines.push('입금 확인 후 당일 발송해 드립니다. 감사합니다!');
+
+    return { order, goodsTotal, shippingFee, payTotal, message: lines.join('\n') };
   },
 
   /* ---------- 현장 판매 계산기 ---------- */
@@ -1636,6 +1693,7 @@ async function pollNongra(force = false) {
     if (db.nongra.orderPageUrl) {
       try {
         const { html: orderHtml } = await nongraFetchPage(db.nongra.orderPageUrl);
+        discoverOrderPage(orderHtml, db.nongra.orderPageUrl); // 판매상품 관리 메뉴도 여기서 발견
         const adminOrders = parseSiteOrders(orderHtml);
         if (adminOrders.length) applySiteOrders(adminOrders);
       } catch {

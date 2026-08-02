@@ -472,8 +472,13 @@ function renderSaleGrid() {
   }
 
   const total = saleCart.reduce((s, c) => s + c.qty * c.unit, 0);
+  const smsFee = total > 0 && total < 100000 ? 4000 : 0; // 10만원 이상 무료배송
   $('#saleTotal').textContent = won(total);
+  $('#smsTotal').textContent = total > 0
+    ? `${won(total + smsFee)}${smsFee ? ` (배송비 ${won(smsFee)})` : ' (무료배송)'}`
+    : '0원';
   $('#saleSubmit').disabled = saleCart.length === 0;
+  $('#smsSubmit').disabled = saleCart.length === 0;
 }
 
 function stepBtn(label, cls, onClick) {
@@ -515,6 +520,65 @@ $('#saleSubmit').addEventListener('click', async () => {
     toast(`현장 판매 ${won(total)} 등록! 농라F 재고도 [✏️ 수정 열기]에서 줄여 주세요.`);
   }
 });
+
+/* ---------- 문자 주문 (현장판매 담기 그대로 사용) ---------- */
+
+$('#smsSubmit').addEventListener('click', async () => {
+  if (!saleCart.length) return;
+
+  const buyer = prompt('① 손님 이름');
+  if (buyer === null || !buyer.trim()) return;
+  const phone = prompt('② 전화번호', '010-');
+  if (phone === null) return;
+  const address = prompt('③ 배송 주소');
+  if (address === null) return;
+
+  // 입금 계좌 문구는 한 번만 물어보고 저장됩니다.
+  if (!state.smsAccount) {
+    const account = prompt('입금 계좌 문구를 한 번만 설정해 주세요.\n(안내 문자에 들어갑니다. 예: 농협 000-0000-0000-00 명정원예)');
+    if (account && account.trim()) {
+      await api('/api/sms-account', { method: 'POST', body: JSON.stringify({ account: account.trim() }) }).catch(() => {});
+    }
+  }
+
+  const result = await act(() => api('/api/sms-order', {
+    method: 'POST',
+    body: JSON.stringify({
+      buyer: buyer.trim(),
+      phone: phone.trim(),
+      address: address.trim(),
+      items: saleCart.map((c) => ({ name: c.name, qty: c.qty, price: c.qty * c.unit })),
+    }),
+  }));
+  if (!result) return;
+
+  saleCart = [];
+  renderSaleGrid();
+
+  // 안내 문구 표시 + 자동 복사
+  $('#smsMsgText').value = result.message;
+  $('#smsMsgBox').classList.remove('hidden');
+  try {
+    await navigator.clipboard.writeText(result.message);
+    toast(`문자 주문 #${result.order.no} 등록! 안내 문구가 복사됐습니다 - 문자에 붙여넣으세요.`);
+  } catch {
+    toast(`문자 주문 #${result.order.no} 등록! 아래 문구를 복사해서 보내세요.`);
+  }
+});
+
+$('#copySmsMsg').addEventListener('click', async () => {
+  const text = $('#smsMsgText').value;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('복사됐습니다! 문자에 붙여넣으세요.');
+  } catch {
+    $('#smsMsgText').select();
+    document.execCommand('copy');
+    toast('복사됐습니다!');
+  }
+});
+
+$('#closeSmsMsg').addEventListener('click', () => $('#smsMsgBox').classList.add('hidden'));
 
 /* ------------------------------------------------------------ 농라F 연동 */
 
@@ -666,12 +730,11 @@ $('#orderForm').addEventListener('submit', async (e) => {
   const result = await act(() => api('/api/orders', {
     method: 'POST',
     body: JSON.stringify({
-      channel: $('#ofChannel').value,
+      channel: 'store',
       buyer: $('#ofBuyer').value,
       phone: $('#ofPhone').value,
       address: $('#ofAddress').value,
       itemsText,
-      status: $('#ofChannel').value === 'sms' ? 'paid' : 'new',
     }),
   }));
   if (result) {
