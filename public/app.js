@@ -591,17 +591,46 @@ $('#closeSmsMsg').addEventListener('click', () => $('#smsMsgBox').classList.add(
 
 /* ---------- 송장 도우미 (롯데 ALPS) ---------- */
 
-$('#alpsOpen').addEventListener('click', async () => {
+$('#alpsOpen').addEventListener('click', () => openInvoiceWindow(false));
+
+async function openInvoiceWindow(force, browserPath) {
   const btn = $('#alpsOpen');
   btn.disabled = true;
   btn.textContent = '여는 중…';
-  const r = await act(() => api('/api/alps/open', { method: 'POST', body: '{}' }));
+  try {
+    const r = await api('/api/alps/open', {
+      method: 'POST',
+      body: JSON.stringify({ force: Boolean(force), browserPath: browserPath || undefined }),
+    });
+    $('#alpsStatus').textContent = `${r.message}${r.browser ? ` · 사용한 브라우저: ${r.browser}` : ''}`;
+    toast('송장 창을 열었습니다. 그 창에서 로그인해 주세요.');
+  } catch (err) {
+    $('#alpsStatus').textContent = err.message;
+    // 브라우저를 못 찾은 경우: 경로를 직접 물어보고 다시 시도합니다.
+    if (/찾지 못했습니다/.test(err.message)) {
+      const p = prompt(
+        '크롬을 자동으로 찾지 못했습니다.\n'
+        + '크롬 실행 파일 경로를 넣어 주세요. (예: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe)\n'
+        + '바탕화면 크롬 아이콘 → 우클릭 → 속성 → "대상"에 있는 경로입니다.',
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      );
+      if (p && p.trim()) {
+        btn.disabled = false;
+        btn.textContent = '🖥 송장 창 열기';
+        return openInvoiceWindow(true, p.trim());
+      }
+    } else {
+      alert('송장 창을 열지 못했습니다.\n\n' + err.message);
+    }
+  }
   btn.disabled = false;
   btn.textContent = '🖥 송장 창 열기';
-  if (r) {
-    $('#alpsStatus').textContent = `${r.message} 로그인 후 [건별주문접수] 화면을 열어 두세요.`;
-    toast('송장 창을 열었습니다. 그 창에서 로그인해 주세요.');
-  }
+  return undefined;
+}
+
+$('#alpsForce').addEventListener('click', () => {
+  if (!confirm('열려 있는 송장 창을 닫고 새로 열까요?')) return;
+  openInvoiceWindow(true);
 });
 
 $('#alpsScan').addEventListener('click', async () => {
@@ -859,6 +888,23 @@ $('#orderForm').addEventListener('submit', async (e) => {
 });
 
 $('#orderFilter').addEventListener('change', renderOrders);
+
+$('#selfCheck').addEventListener('click', async () => {
+  const btn = $('#selfCheck');
+  btn.disabled = true;
+  btn.textContent = '점검 중…';
+  try {
+    const r = await api('/api/selfcheck');
+    const text = ['🌸 전체 점검 결과', '', ...r.lines,
+      '', r.ok ? '✅ 문제 없습니다.' : '⚠ 확인이 필요합니다:',
+      ...(r.problems || []).map((p) => `· ${p}`)].join('\n');
+    alert(text);
+  } catch (err) {
+    alert('점검 실패: ' + err.message);
+  }
+  btn.disabled = false;
+  btn.textContent = '🩺 전체 점검';
+});
 
 $('#resetAll').addEventListener('click', () => {
   if (!confirm('주문 기록을 전부 비울까요? 되돌릴 수 없습니다.\n(농라F 연동 설정은 유지됩니다)')) return;

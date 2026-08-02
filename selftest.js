@@ -215,6 +215,7 @@ async function startApp(fresh) {
       DATA_DIR,
       ALPS_PORT: String(CDP_PORT),
       ALPS_SITE_RE: `localhost:${ALPS_SHELL_PORT}|127\\.0\\.0\\.1:${ALPS_FORM_PORT}`,
+      ALPS_LOGIN_URL: `http://localhost:${ALPS_SHELL_PORT}/`,
       TZ: 'Asia/Seoul',
     },
     stdio: 'ignore',
@@ -340,13 +341,9 @@ async function main() {
   try {
     process.env.ALPS_HEADLESS = process.env.ALPS_HEADLESS || '1';
     const testModule = path.join(os.tmpdir(), `alps-selftest-${process.pid}.js`);
-    let src = fs.readFileSync(path.join(__dirname, 'alps.js'), 'utf8');
-    src = src.replace(
-      "const ALPS_LOGIN_URL = 'https://partner.alps.llogis.com/main/pages/sec/authentication';",
-      `const ALPS_LOGIN_URL = 'http://localhost:${ALPS_SHELL_PORT}/';`,
-    );
+    process.env.ALPS_LOGIN_URL = `http://localhost:${ALPS_SHELL_PORT}/`;
     process.env.ALPS_SITE_RE = `localhost:${ALPS_SHELL_PORT}|127\\.0\\.0\\.1:${ALPS_FORM_PORT}`;
-    fs.writeFileSync(testModule, src);
+    fs.writeFileSync(testModule, fs.readFileSync(path.join(__dirname, 'alps.js'), 'utf8'));
     const testAlps = require(testModule);
 
     await testAlps.launch();
@@ -371,6 +368,14 @@ async function main() {
       await sleep(500);
       check('사이트에 저장됨', alpsSaved && alpsSaved.edtAcperNm === '이선희');
       check('송하인은 그대로 유지', alpsSaved && alpsSaved.edtSndrNm === '명정원예영농조합법인');
+
+      // 창이 멈췄을 때 스스로 닫고 다시 여는지
+      const again = await testAlps.launch({ force: true });
+      check('강제 다시 열기로 창 복구', again.started === true,
+        `${again.message} / ${(again.log || []).join(' → ')}`);
+      await sleep(1500);
+      const reStatus = await testAlps.status();
+      check('다시 연 창에서도 송장 화면 인식', reStatus.form === true, reStatus.message);
     }
     fs.rmSync(testModule, { force: true });
   } catch (err) {
@@ -388,6 +393,21 @@ async function main() {
   const after = (await api('/api/state')).data;
   const nongraCount = after.orders.filter((o) => o.channel === 'nongra').length;
   check('중복 등록 없음', nongraCount === 2, `농라 주문 ${nongraCount}건`);
+
+  console.log('\n[9] 프로그램 스스로 점검하기 (🩺 전체 점검)');
+  const sc = (await api('/api/selfcheck')).data;
+  check('점검 결과를 한국어로 알려준다',
+    Array.isArray(sc.lines) && sc.lines.length >= 5, JSON.stringify(sc).slice(0, 120));
+  check('농라F 상태를 짚어준다',
+    (sc.lines || []).some((l) => l.includes('농라F')));
+  check('송장 브라우저 위치를 알려준다',
+    (sc.lines || []).some((l) => l.includes('송장용 브라우저')));
+  check('문제가 있으면 무엇이 문제인지 알려준다',
+    Array.isArray(sc.problems) && typeof sc.ok === 'boolean');
+  const openFail = await api('/api/alps/open', { method: 'POST', body: '{}' });
+  check('송장 창을 못 열면 시도 내용까지 알려준다',
+    openFail.ok || (openFail.data.error || '').includes('시도한 내용') || openFail.data.started !== undefined,
+    JSON.stringify(openFail.data).slice(0, 160));
 
   console.log(`\n${'─'.repeat(46)}`);
   if (fail === 0) {

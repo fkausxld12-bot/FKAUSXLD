@@ -21,7 +21,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const ALPS_LOGIN_URL = 'https://partner.alps.llogis.com/main/pages/sec/authentication';
+const ALPS_LOGIN_URL = process.env.ALPS_LOGIN_URL
+  || 'https://partner.alps.llogis.com/main/pages/sec/authentication';
 const DEBUG_PORT = Number(process.env.ALPS_PORT) || 9222;
 const PROFILE_DIR = path.join(os.homedir(), '.flower-workshop', 'chrome-profile');
 const SITE_RE = new RegExp(process.env.ALPS_SITE_RE || 'alps\\.llogis\\.com');
@@ -101,20 +102,37 @@ function __findField(plan) {
 
 /* ------------------------------------------------------- 브라우저 찾기/띄우기 */
 
-function findBrowser() {
-  const candidates = [
+let userBrowserPath = ''; // 사장님이 직접 알려준 브라우저 경로
+
+function setBrowserPath(p) {
+  userBrowserPath = String(p || '').trim();
+}
+
+function browserCandidates() {
+  const home = os.homedir();
+  const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  return [
+    userBrowserPath,
     process.env.CHROME_PATH,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(pf, 'Naver', 'Naver Whale', 'Application', 'whale.exe'),
+    path.join(pf86, 'Naver', 'Naver Whale', 'Application', 'whale.exe'),
+    path.join(local, 'Naver', 'Naver Whale', 'Application', 'whale.exe'),
+    path.join(local, 'Chromium', 'Application', 'chrome.exe'),
     '/opt/pw-browsers/chromium/chrome-linux/chrome',
-    '/opt/pw-browsers/chromium',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
   ].filter(Boolean);
-  for (const p of candidates) {
+}
+
+function findBrowser() {
+  for (const p of browserCandidates()) {
     try {
       if (fs.statSync(p).isFile()) return p;
     } catch {
@@ -155,22 +173,76 @@ async function browserAlive() {
   }
 }
 
-/** 브라우저를 띄우고 ALPS 로그인 페이지를 엽니다. (로그인은 사장님이 직접) */
-async function launch() {
+/** 실행 중인 브라우저를 닫습니다. (멈춘 창 정리용) */
+async function closeBrowser() {
+  try {
+    await send('Browser.close');
+  } catch {
+    /* 응답 없으면 그냥 진행 */
+  }
+  try {
+    if (ws) ws.close();
+  } catch {
+    /* 무시 */
+  }
+  ws = null;
+  if (browserProc) {
+    try { browserProc.kill(); } catch { /* 무시 */ }
+    browserProc = null;
+  }
+}
+
+let lastLaunchLog = [];
+
+/**
+ * 브라우저를 띄우고 ALPS 로그인 페이지를 엽니다. (로그인은 사장님이 직접)
+ * force=true 면 멈춰 있는 창을 닫고 새로 엽니다.
+ */
+async function launch({ force = false, browserPath } = {}) {
+  if (browserPath) setBrowserPath(browserPath);
+  const log = [];
+  lastLaunchLog = log;
+
   if (await browserAlive()) {
-    const r = await openAlpsTab();
-    return {
-      started: false,
-      message: r.created
-        ? '송장 창을 새로 열었습니다. 그 창에서 로그인해 주세요.'
-        : '이미 열려 있는 송장 창을 앞으로 가져왔습니다.',
-    };
+    log.push('이미 실행 중인 창 감지');
+    if (force) {
+      await closeBrowser();
+      log.push('기존 창을 닫았습니다');
+      await sleep(1800);
+    } else {
+      // 정상인 창인지 확인 — 페이지가 하나도 없으면 멈춘 창입니다.
+      let pages = [];
+      try {
+        const { targetInfos } = await send('Target.getTargets');
+        pages = targetInfos.filter((t) => t.type === 'page');
+        log.push(`열린 탭 ${pages.length}개`);
+      } catch (err) {
+        log.push(`기존 창이 응답하지 않음: ${err.message}`);
+      }
+      if (pages.length) {
+        const r = await openAlpsTab();
+        return {
+          started: false,
+          message: r.created
+            ? '송장 창에 롯데 파트너 페이지를 새로 열었습니다. 그 창에서 로그인해 주세요.'
+            : '이미 열려 있는 송장 창을 앞으로 가져왔습니다. 그 창을 확인해 주세요.',
+          log,
+        };
+      }
+      await closeBrowser();
+      log.push('멈춘 창을 닫고 새로 엽니다');
+      await sleep(1800);
+    }
   }
 
   const exe = findBrowser();
   if (!exe) {
-    throw new Error('크롬(또는 엣지)을 찾지 못했습니다. 크롬을 설치한 뒤 다시 시도해 주세요.');
+    throw new Error(
+      '크롬·엣지·웨일을 찾지 못했습니다. 크롬을 설치하시거나, 크롬 실행 파일 경로를 알려 주세요.\n'
+      + `(찾아본 곳: ${browserCandidates().slice(1, 5).join(' / ')})`,
+    );
   }
+  log.push(`브라우저: ${exe}`);
 
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
   const args = [
@@ -182,23 +254,45 @@ async function launch() {
     ALPS_LOGIN_URL,
   ];
   if (process.env.ALPS_HEADLESS === '1') args.unshift('--headless=new');
-  if (process.env.ALPS_NO_SANDBOX === '1') args.unshift('--no-sandbox'); // 테스트 환경용
+  if (process.env.ALPS_NO_SANDBOX === '1') args.unshift('--no-sandbox');
 
-  browserProc = spawn(exe, args, { detached: true, stdio: 'ignore' });
+  let spawnError = '';
+  let exitInfo = '';
+  let stderrTail = '';
+  browserProc = spawn(exe, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  browserProc.on('error', (err) => { spawnError = err.message; });
+  browserProc.on('exit', (code) => { exitInfo = `종료됨(코드 ${code})`; });
+  if (browserProc.stderr) {
+    browserProc.stderr.on('data', (chunk) => {
+      stderrTail = (stderrTail + chunk.toString()).slice(-400);
+    });
+  }
   browserProc.unref();
 
-  for (let i = 0; i < 30; i += 1) {
+  for (let i = 0; i < 40; i += 1) {
     await sleep(400);
+    if (spawnError) break;
     if (await browserAlive()) {
-      await sleep(600);
+      await sleep(800);
       await openAlpsTab().catch(() => {});
+      log.push('연결 성공');
       return {
         started: true,
-        message: '송장 창을 열었습니다. 반드시 이 새 창에서 로그인해 주세요. (평소 쓰시는 크롬 창은 프로그램이 볼 수 없습니다)',
+        message: `송장 창을 열었습니다 (${path.basename(exe)}). 반드시 이 새 창에서 로그인해 주세요. `
+          + '평소 쓰시는 브라우저 창은 프로그램이 볼 수 없습니다.',
+        log,
       };
     }
   }
-  throw new Error('브라우저는 실행됐지만 연결하지 못했습니다. 창을 닫고 다시 시도해 주세요.');
+
+  const reason = [spawnError && `실행 오류: ${spawnError}`, exitInfo, stderrTail && `메시지: ${stderrTail.trim()}`]
+    .filter(Boolean)
+    .join(' / ');
+  throw new Error(
+    `브라우저를 열지 못했습니다. ${reason || '창이 뜨지 않았습니다.'}\n`
+    + `사용한 프로그램: ${exe}\n`
+    + '작업 관리자에서 크롬을 모두 종료한 뒤 [강제 다시 열기]를 눌러 보세요.',
+  );
 }
 
 /** ALPS 탭을 찾아 앞으로 가져오고, 없으면 새로 엽니다. */
@@ -533,4 +627,4 @@ async function saveForm() {
   return { clicked, verified, before, after };
 }
 
-module.exports = { launch, status, fillOrder, saveForm, scanScreen, ALPS_LOGIN_URL };
+module.exports = { launch, status, fillOrder, saveForm, scanScreen, setBrowserPath, findBrowser, ALPS_LOGIN_URL };
