@@ -50,6 +50,13 @@ const emptyDb = () => ({
     mbPw: '',
     processed: {}, // 처리한 댓글 key → 주문 id 또는 'skipped'
   },
+  // 스마트스토어(네이버 커머스 API) 연동 설정
+  store: {
+    clientId: '', // 애플리케이션 ID
+    clientSecret: '', // 애플리케이션 시크릿
+    lastSync: '', // 마지막으로 확인한 시각
+    processed: {}, // productOrderId → 주문 id
+  },
   updatedAt: new Date().toISOString(),
 });
 
@@ -70,6 +77,7 @@ function loadDb() {
         // 이전 밴드 연동 버전에서 넘어온 처리 기록도 이어받습니다.
         processed: { ...((raw.band || {}).processed || {}), ...((raw.nongra || {}).processed || {}) },
       },
+      store: { ...base.store, ...(raw.store || {}) },
     };
   } catch {
     return emptyDb();
@@ -210,6 +218,7 @@ const routes = {
       error: nongraCache.error,
       loggedIn: nongraCache.loggedIn,
     },
+    store: storePublic(),
     updatedAt: db.updatedAt,
   }),
 
@@ -882,6 +891,208 @@ function nongraInboxWithFlags() {
     processed: Boolean(db.nongra.processed[postKeyOf(p)]),
   }));
 }
+
+/* ------------------------------------------- 스마트스토어(커머스 API) */
+
+// bcryptjs는 시작하기.bat이 자동으로 설치합니다. 없으면 스토어 연동만 꺼집니다.
+let bcrypt = null;
+try {
+  bcrypt = require('bcryptjs');
+} catch {
+  /* npm install 전 */
+}
+
+const COMMERCE_BASE = 'https://api.commerce.naver.com';
+const STORE_POLL_MS = 5 * 60 * 1000; // 5분마다 자동 확인
+
+const storeCache = {
+  token: '',
+  tokenExpiresAt: 0,
+  fetchedAt: null,
+  error: '',
+  polling: false,
+};
+
+function storePublic() {
+  return {
+    configured: Boolean(db.store.clientId && db.store.clientSecret),
+    ready: Boolean(bcrypt),
+    fetchedAt: storeCache.fetchedAt,
+    error: storeCache.error,
+  };
+}
+
+// 커머스 API 인증 토큰 발급 (전자서명 = bcrypt(clientId_timestamp, secret))
+async function storeToken() {
+  if (!bcrypt) {
+    throw httpError(500, '스토어 연동 부품(bcryptjs)이 없습니다. 시작하기.bat을 다시 실행해 주세요.');
+  }
+  if (storeCache.token && Date.now() < storeCache.tokenExpiresAt - 60000) {
+    return storeCache.token;
+  }
+  const timestamp = Date.now();
+  const sign = Buffer.from(
+    bcrypt.hashSync(`${db.store.clientId}_${timestamp}`, db.store.clientSecret),
+  ).toString('base64');
+
+  const body = new URLSearchParams({
+    client_id: db.store.clientId,
+    timestamp: String(timestamp),
+    grant_type: 'client_credentials',
+    client_secret_sign: sign,
+    type: 'SELF',
+  });
+
+  let res;
+  try {
+    res = await fetch(`${COMMERCE_BASE}/external/v1/oauth2/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch {
+    throw httpError(502, '네이버 커머스 API에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) {
+    const msg = data.message || data.code || res.status;
+    if (String(msg).includes('IP') || res.status === 403) {
+      throw httpError(403, `커머스 API 거부: ${msg} — 커머스API센터의 "API호출 IP"에 이 컴퓨터의 공인 IP를 등록했는지 확인하세요.`);
+    }
+    throw httpError(401, `커머스 API 인증 실패: ${msg} — 애플리케이션 ID/시크릿을 다시 확인해 주세요.`);
+  }
+  storeCache.token = data.access_token;
+  storeCache.tokenExpiresAt = Date.now() + (Number(data.expires_in) || 10800) * 1000;
+  return storeCache.token;
+}
+
+async function commerceApi(method, apiPath, payload) {
+  const token = await storeToken();
+  let res;
+  try {
+    res = await fetch(COMMERCE_BASE + apiPath, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: payload ? JSON.stringify(payload) : undefined,
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch {
+    throw httpError(502, '네이버 커머스 API에 연결하지 못했습니다.');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw httpError(502, `커머스 API 오류: ${data.message || data.code || res.status}`);
+  }
+  return data;
+}
+
+// 결제된 주문을 가져와 주문 목록에 자동 등록합니다.
+async function pollStore(force = false) {
+  if (!db.store.clientId || !db.store.clientSecret || !bcrypt || storeCache.polling) return;
+  storeCache.polling = true;
+  try {
+    // 최근 확인 시점부터(최대 24시간 전) 결제 완료된 주문 변경 내역 조회
+    const from = new Date(Math.max(
+      db.store.lastSync ? new Date(db.store.lastSync).getTime() - 10 * 60 * 1000 : 0,
+      Date.now() - 24 * 60 * 60 * 1000,
+    )).toISOString();
+
+    const changed = await commerceApi(
+      'GET',
+      `/external/v1/pay-order/seller/product-orders/last-changed-statuses?lastChangedFrom=${encodeURIComponent(from)}&lastChangedType=PAYED`,
+    );
+    const list = (changed.data && (changed.data.lastChangeStatuses || changed.data)) || [];
+    const newIds = [];
+    for (const entry of Array.isArray(list) ? list : []) {
+      const id = entry.productOrderId || entry.productOrderNo;
+      if (id && !db.store.processed[id]) newIds.push(String(id));
+    }
+
+    if (newIds.length) {
+      // 상세 조회 (한 번에 최대 100건)
+      const detail = await commerceApi('POST', '/external/v1/pay-order/seller/product-orders/query', {
+        productOrderIds: newIds.slice(0, 100),
+      });
+      const rows = (detail.data && (Array.isArray(detail.data) ? detail.data : detail.data.productOrders)) || [];
+
+      let created = 0;
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const po = row.productOrder || row;
+        const ord = row.order || {};
+        const id = String(po.productOrderId || '');
+        if (!id || db.store.processed[id]) continue;
+
+        const qty = Math.max(1, Number(po.quantity) || 1);
+        const optionText = po.productOption ? ` (${po.productOption})` : '';
+        // 배송비를 뺀 상품 금액만 기록합니다.
+        const amount = Number(po.totalPaymentAmount || po.totalProductAmount || 0)
+          - Number(po.deliveryFeeAmount || 0);
+        const addr = po.shippingAddress || {};
+
+        db.orderSeq += 1;
+        const order = {
+          id: nextId(),
+          no: db.orderSeq,
+          channel: 'store',
+          buyer: addr.name || ord.ordererName || '',
+          phone: addr.tel1 || ord.ordererTel || '',
+          address: [addr.baseAddress, addr.detailedAddress].filter(Boolean).join(' '),
+          memo: `스토어 주문 ${po.productOrderId}`,
+          items: [{
+            productId: null,
+            name: String(po.productName || '스토어 상품') + optionText,
+            qty,
+            price: Math.max(0, amount),
+          }],
+          status: 'paid',
+          createdAt: new Date().toISOString(),
+          shippedAt: null,
+          printedAt: null,
+        };
+        db.orders.unshift(order);
+        db.store.processed[id] = order.id;
+        logHistory('order', `스토어 주문 자동 등록 → 주문 #${order.no} (${order.buyer})`);
+        created += 1;
+      }
+      if (created) save();
+    }
+
+    db.store.lastSync = new Date().toISOString();
+    storeCache.fetchedAt = db.store.lastSync;
+    storeCache.error = '';
+    save();
+  } catch (err) {
+    storeCache.error = err.message || '스토어 조회 실패';
+  } finally {
+    storeCache.polling = false;
+  }
+}
+
+setInterval(() => pollStore(false), STORE_POLL_MS);
+setTimeout(() => pollStore(true), 5000); // 서버 시작 5초 후 첫 확인
+
+routes['POST /api/store/settings'] = async (body) => {
+  if (body.clientId !== undefined) db.store.clientId = String(body.clientId).trim();
+  if (body.clientSecret !== undefined) db.store.clientSecret = String(body.clientSecret).trim();
+  storeCache.token = '';
+  storeCache.error = '';
+  if (db.store.clientId && db.store.clientSecret) {
+    await pollStore(true);
+    if (storeCache.error) throw httpError(502, `저장은 했지만 확인 실패: ${storeCache.error}`);
+  }
+  return { store: storePublic() };
+};
+
+routes['POST /api/store/refresh'] = async () => {
+  if (!db.store.clientId) throw httpError(400, '스토어 애플리케이션 ID/시크릿을 먼저 저장해 주세요.');
+  await pollStore(true);
+  if (storeCache.error) throw httpError(502, storeCache.error);
+  return { store: storePublic() };
+};
 
 /* ---------------------------------------------------------------- 서버 */
 
