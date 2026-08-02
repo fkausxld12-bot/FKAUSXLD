@@ -1,13 +1,14 @@
 @echo off
-chcp 65001 >nul
-title 꽃 작업장 주문·판매 관리
+title Flower Workshop Manager
 cd /d "%~dp0"
+chcp 65001 >nul
 
 where node >nul 2>nul
 if errorlevel 1 (
   echo.
-  echo  Node.js가 설치되어 있지 않습니다.
-  echo  https://nodejs.org 에서 LTS 버전을 설치한 뒤 다시 실행해 주세요.
+  echo  Node.js is not installed.
+  echo  Install the LTS version from  https://nodejs.org
+  echo  then run this file again.
   echo.
   pause
   exit /b 1
