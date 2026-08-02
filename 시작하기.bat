@@ -14,6 +14,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo Closing old version if running...
+taskkill /f /im node.exe >nul 2>nul
+
 if not exist "node_modules\bcryptjs" (
   echo Installing components... please wait.
   call npm install --no-audit --no-fund

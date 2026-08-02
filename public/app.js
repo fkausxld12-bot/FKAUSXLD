@@ -470,7 +470,7 @@ $('#runDiag').addEventListener('click', async () => {
   out.textContent = '진단 중… (몇 초 걸립니다)';
   try {
     const d = await api('/api/nongra/diag');
-    let text = `로그인: ${d.loggedIn ? '됨' : '안 됨'}\n`;
+    let text = `프로그램 버전: ${state.version || '?'}\n로그인: ${d.loggedIn ? '됨' : '안 됨'}\n`;
     text += `게시판 목록 응답: ${d.listStatus} (${fmt(d.listSize)}바이트)\n`;
     text += `발견한 글 번호: ${d.foundPostIds.join(', ') || '없음 ← 주소가 맞는지 확인'}\n`;
     if (d.orderPage) {

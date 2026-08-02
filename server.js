@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v13'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v15'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -510,6 +510,11 @@ const routes = {
         while (stockSpots.length < 2 && (idx = html.indexOf('재고', idx + 1)) >= 0) {
           stockSpots.push(html.slice(Math.max(0, idx - 120), idx + 280).replace(/\s+/g, ' '));
         }
+        // 실시간 재고를 그리는 스크립트 앞부분 (AJAX 주소 확인용)
+        const showIdx = html.indexOf('stock_show1');
+        if (showIdx >= 0) {
+          stockSpots.push('[스크립트] ' + html.slice(Math.max(0, showIdx - 700), showIdx + 100).replace(/\s+/g, ' '));
+        }
 
         posts.push({
           wrId,
@@ -540,12 +545,16 @@ const routes = {
         const otext = stripTags(
           oh.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
         );
+        // 주문 형식 확인용: 첫 날짜가 나오는 부분부터 보여줍니다.
+        const dateM = otext.match(/\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}/);
         orderPage = {
           url: db.nongra.orderPageUrl,
           bytes: oh.length,
           orders: found.length,
           sample: found.slice(0, 2).map((o) => `${o.orderNo} ${o.buyer} ${o.items.map((i) => `${i.name} ${i.qty}개`).join(',')}`),
-          textPreview: otext.slice(0, 500),
+          textPreview: dateM
+            ? otext.slice(Math.max(0, dateM.index - 100), dateM.index + 700)
+            : otext.slice(0, 500) + '\n(날짜 형식의 주문을 찾지 못했습니다)',
         };
       } catch (err) {
         orderPage = { url: db.nongra.orderPageUrl, error: err.message };
@@ -1012,15 +1021,20 @@ function parseSalesWidget(html) {
  */
 function parseSiteOrders(html) {
   const text = stripTags(
-    String(html).replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
+    String(html)
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      // 상태 드롭다운에서 선택 안 된 항목은 지워서 실제 상태만 남깁니다.
+      .replace(/<option(?![^>]*selected)[^>]*>[\s\S]*?<\/option>/gi, ''),
   );
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  const STATUS_WORDS = /입금완료|입금대기|결제완료|발송완료|배송완료|주문취소|취소/;
+  const STATUS_WORDS = /입금완료|입금대기|결제완료|주문완료|발송완료|배송완료|주문취소|취소/;
   const entries = [];
   let cur = null;
 
   for (const line of lines) {
-    const start = line.match(/^(\d{2}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
+    // 날짜가 줄 어디에 있어도 주문의 시작으로 인정합니다.
+    const start = line.match(/(\d{2}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
     if (start) {
       if (cur) entries.push(cur);
       cur = {
@@ -1074,7 +1088,7 @@ function parseSiteOrders(html) {
 }
 
 const SITE_STATUS_MAP = {
-  입금대기: 'new', 입금완료: 'paid', 결제완료: 'paid',
+  주문완료: 'new', 입금대기: 'new', 입금완료: 'paid', 결제완료: 'paid',
   발송완료: 'shipped', 배송완료: 'shipped', 주문취소: 'canceled', 취소: 'canceled',
 };
 const STATUS_RANK = { new: 0, paid: 1, ready: 2, shipped: 3 };
@@ -1160,6 +1174,34 @@ function applySiteOrders(entries) {
   return changed;
 }
 
+/**
+ * farmer4989 전용 상품 파서.
+ * 재고가 HTML 주석 속에 있고(<!-- 재고 : 16 개 -->) 가격은 바로 다음
+ * <div class="fr won">8,000원</div>에, 상품명은 그 앞 텍스트에 있습니다.
+ */
+function parseNongraProducts(html) {
+  const products = [];
+  const re = /재고\s*:\s*(\d+)\s*개[\s\S]{0,120}?class="fr won">([\d,]+)원</g;
+  let m;
+  while ((m = re.exec(html))) {
+    const stock = Number(m[1]);
+    const price = num(m[2]);
+    // 이 블록 앞 500자 안에서 상품명으로 보이는 마지막 텍스트 조각을 찾습니다.
+    const before = html.slice(Math.max(0, m.index - 500), m.index);
+    const texts = [...before.matchAll(/>([^<>\n]{2,40})</g)]
+      .map((x) => x[1].trim())
+      .filter((t) => t
+        && !/^[\d,.\s원개%]+$/.test(t)
+        && !/재고|용량|수량|원$|선택|합계|배송|주문|판매중|품절/.test(t)
+        && !/^[-–—>]+$/.test(t));
+    const name = texts.length ? texts[texts.length - 1] : '';
+    if (!name) continue;
+    if (products.some((p) => p.name === name)) continue;
+    products.push({ name, price, stock, progress: 0, sold: 0, approx: true });
+  }
+  return products;
+}
+
 async function pollNongra(force = false) {
   const n = db.nongra;
   if (!n.base || !n.boTable || nongraCache.polling) return;
@@ -1190,7 +1232,12 @@ async function pollNongra(force = false) {
 
         // ① 상품 선택표가 있으면 = 판매 페이지 → 상품·재고·판매 수량 동기화
         //    (주문보다 먼저 읽어야 품목별 개당 가격을 매칭할 수 있습니다)
-        const widget = parseSalesWidget(html);
+        let widget = parseSalesWidget(html);
+        if (widget.length < 2) {
+          // farmer4989처럼 재고가 주석 속에 있는 구조
+          const staticWidget = parseNongraProducts(html);
+          if (staticWidget.length >= 2) widget = staticWidget;
+        }
         if (widget.length >= 2) applySalesWidget(wrId, widget);
 
         // ② 페이지에 주문 목록이 있으면 주문을 등록/동기화합니다.
@@ -1592,6 +1639,18 @@ function serveStatic(req, res, pathname) {
 const server = http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  // 새 버전이 실행되면 이 주소로 종료를 요청해 자리를 넘겨받습니다. (내 컴퓨터에서만 허용)
+  if (pathname === '/api/shutdown' && req.method === 'POST') {
+    const remote = String(req.socket.remoteAddress || '');
+    if (!/^(::1|::ffff:127\.|127\.)/.test(remote)) {
+      return sendJson(res, 403, { error: '이 컴퓨터에서만 가능합니다.' });
+    }
+    sendJson(res, 200, { ok: true, version: APP_VERSION });
+    console.log('\n  새 버전이 실행되어 이 창은 종료됩니다. 이 창은 닫으셔도 됩니다.\n');
+    setTimeout(() => process.exit(0), 300);
+    return undefined;
+  }
+
   if (!pathname.startsWith('/api/')) return serveStatic(req, res, pathname);
 
   const route = matchRoute(req.method, pathname);
@@ -1617,11 +1676,37 @@ function localAddresses() {
   return out;
 }
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log('\n  꽃 작업장 주문/판매 관리 실행 중\n');
+let takeoverTries = 0;
+
+server.on('listening', () => {
+  console.log(`\n  꽃 작업장 주문 관리 ${APP_VERSION} 실행 중\n`);
   console.log(`  이 컴퓨터        : http://localhost:${PORT}`);
   for (const ip of localAddresses()) {
     console.log(`  휴대폰/다른 PC   : http://${ip}:${PORT}   (같은 와이파이)`);
   }
   console.log('\n  종료하려면 Ctrl + C\n');
 });
+
+// 예전 버전이 켜져 있으면 종료를 요청하고 자리를 넘겨받습니다.
+server.on('error', async (err) => {
+  if (err.code === 'EADDRINUSE' && takeoverTries < 3) {
+    takeoverTries += 1;
+    console.log('  이전 버전이 실행 중입니다. 종료를 요청합니다...');
+    try {
+      await fetch(`http://127.0.0.1:${PORT}/api/shutdown`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch {
+      /* 아주 예전 버전은 종료 요청을 모릅니다 */
+    }
+    setTimeout(() => server.listen(PORT, '0.0.0.0'), 1500);
+  } else if (err.code === 'EADDRINUSE') {
+    console.log('\n  이미 실행 중인 프로그램이 있습니다.');
+    console.log('  검은 창을 전부 닫은 뒤 시작하기.bat을 다시 실행해 주세요.\n');
+  } else {
+    console.error('  실행 오류:', err.message);
+  }
+});
+
+server.listen(PORT, '0.0.0.0');
