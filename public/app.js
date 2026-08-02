@@ -105,12 +105,49 @@ function orderTotal(order) {
 
 function render() {
   renderSummary();
+  renderSalesDays();
   renderNongraStatus();
   renderStoreStatus();
   renderQty();
   renderOrders();
   renderSaleGrid();
 }
+
+// 날짜별 매출 표 (발송글 기준 판매일)
+function renderSalesDays() {
+  const list = $('#salesDayList');
+  list.innerHTML = '';
+  const rows = state.salesSummary || [];
+  $('#emptySalesDay').classList.toggle('hidden', rows.length > 0);
+
+  for (const r of rows) {
+    const li = document.createElement('li');
+    li.className = 'item';
+    const isCurrent = r.label === state.currentLabel;
+    li.innerHTML = `
+      <div class="item-info"><div class="item-name">${labelText(r.label)}${isCurrent ? ' <span class="chip status-ready">진행 중</span>' : ''}</div></div>
+      <div class="stock-n">${fmt(r.count)}<small>주문</small></div>
+      <div class="stock-n">${fmt(r.qty)}<small>수량</small></div>
+      <div class="stock-n" style="min-width:90px">${fmt(r.amount)}<small>매출(원)</small></div>`;
+    list.appendChild(li);
+  }
+}
+
+$('#newSalesDay').addEventListener('click', () => {
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const def = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+  const input = prompt('새 판매일 날짜 (예: 2026-08-03)\n지금부터 들어오는 주문이 이 날짜 매출로 잡힙니다.', def);
+  if (input === null) return;
+  act(
+    () => api('/api/salesday', { method: 'POST', body: JSON.stringify({ label: input.trim() }) }),
+    (r) => `${labelText(r.currentLabel)} 판매일 시작! 지금부터 이 날짜 매출로 잡힙니다.`,
+  );
+});
+
+$('#undoSalesDay').addEventListener('click', () => {
+  if (!confirm('마지막 판매일 시작을 취소할까요?')) return;
+  act(() => api('/api/salesday/undo', { method: 'POST', body: '{}' }), '되돌렸습니다.');
+});
 
 function renderStoreStatus() {
   const s = state.store || {};
@@ -154,16 +191,27 @@ function learnedProducts() {
     .sort((a, b) => b.count - a.count);
 }
 
+// '2026-08-03' → '8/3'
+function labelText(label) {
+  if (!label || label.length < 10) return label || '';
+  return `${Number(label.slice(5, 7))}/${Number(label.slice(8, 10))}`;
+}
+
 function renderSummary() {
   const active = state.orders.filter((o) => o.status !== 'canceled');
   const newNongra = active.filter((o) => o.channel === 'nongra' && o.status === 'new').length;
   const newStore = active.filter((o) => o.channel === 'store' && o.status === 'new').length;
-  const today = active.filter((o) => isToday(o.createdAt));
+
+  // 이번 장(현재 판매일) 기준 주문·매출
+  const cur = (state.salesSummary || []).find((r) => r.label === state.currentLabel)
+    || { count: 0, amount: 0 };
+  $('#labelCntToday').textContent = `이번 장(${labelText(state.currentLabel)}) 주문`;
+  $('#labelSumToday').textContent = `이번 장(${labelText(state.currentLabel)}) 매출`;
 
   $('#cntNongra').textContent = fmt(newNongra);
   $('#cntStore').textContent = fmt(newStore);
-  $('#cntToday').textContent = fmt(today.length);
-  $('#sumToday').textContent = fmt(today.reduce((s, o) => s + orderTotal(o), 0));
+  $('#cntToday').textContent = fmt(cur.count);
+  $('#sumToday').textContent = fmt(cur.amount);
 
   // 새 주문이 늘어나면 알림음과 함께 알려줍니다.
   const newCount = newNongra + newStore;
