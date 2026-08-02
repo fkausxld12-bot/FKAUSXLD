@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v24'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v25'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -74,7 +74,7 @@ const emptyDb = () => ({
   // 판매일(장) 경계: 새 발송글 기준으로 매출 날짜를 나눕니다.
   salesDays: [], // [{ id, at, label: 'YYYY-MM-DD' }]
   // 문자 주문 안내 문구 설정
-  smsInfo: { account: '' }, // 입금 계좌 문구 (예: 농협 000-000 명정원예)
+  smsInfo: { account: '농협 351-1168-0445-63 명정원예영농조합법인' }, // 입금 계좌 문구
   // 스마트스토어(네이버 커머스 API) 연동 설정
   store: {
     clientId: '', // 애플리케이션 ID
@@ -97,7 +97,7 @@ function loadDb() {
       history: Array.isArray(raw.history) ? raw.history : [],
       orderSeq: Number(raw.orderSeq) || 0,
       salesDays: Array.isArray(raw.salesDays) ? raw.salesDays : [],
-      smsInfo: { ...base.smsInfo, ...(raw.smsInfo || {}) },
+      smsInfo: { account: (raw.smsInfo && raw.smsInfo.account) || base.smsInfo.account },
       nongra: {
         ...base.nongra,
         ...(raw.nongra || {}),
@@ -724,12 +724,59 @@ const routes = {
       }
     }
 
+    // 롯데택배 파트너(ALPS) 구조 진단 (읽기 전용 - 송장 자동등록 준비)
+    let alps = null;
+    try {
+      const ares = await fetch('https://partner.alps.llogis.com/main/pages/sec/authentication', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(15000),
+      });
+      const ahtml = await ares.text();
+      // 페이지 안의 스크립트에서 로그인/API 주소 흔적을 찾습니다.
+      const scripts = [...ahtml.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]).slice(0, 5);
+      const apiHits = new Set();
+      const grabApis = (txt) => {
+        for (const m of txt.matchAll(/["'](\/[a-zA-Z0-9_\-./]*(?:login|auth|api|invoice|waybill|order)[a-zA-Z0-9_\-./]*)["']/gi)) {
+          apiHits.add(m[1]);
+          if (apiHits.size >= 20) break;
+        }
+      };
+      grabApis(ahtml);
+      for (const s of scripts.slice(0, 2)) {
+        try {
+          const su = new URL(s, 'https://partner.alps.llogis.com');
+          const sres = await fetch(su, { signal: AbortSignal.timeout(15000) });
+          grabApis(await sres.text());
+        } catch {
+          /* 무시 */
+        }
+      }
+      const formM = ahtml.match(/<form[^>]*action=["']([^"']+)["']/i);
+      const inputs = [...ahtml.matchAll(/<input\b[^>]*name=["']([^"']+)["']/gi)].map((m) => m[1]).slice(0, 20);
+      alps = {
+        status: ares.status,
+        bytes: ahtml.length,
+        formAction: formM ? formM[1] : '(HTML 폼 없음 - 스크립트 방식)',
+        inputs,
+        scripts,
+        apiEndpoints: [...apiHits].slice(0, 20),
+      };
+    } catch (err) {
+      alps = { error: err.message };
+    }
+
     // 주문배송 페이지가 발견됐으면 그 페이지도 진단합니다.
     let orderPage = null;
     if (db.nongra.orderPageUrl) {
       try {
         const { html: oh } = await nongraFetchPage(db.nongra.orderPageUrl);
+        discoverOrderPage(oh, db.nongra.orderPageUrl); // 판매상품 관리 메뉴 탐색
         const found = parseSiteOrders(oh);
+        // 상품 관련 링크 후보를 보여줍니다 (판매상품 관리 주소 확인용)
+        const productLinks = findLinks(oh)
+          .filter((l) => /상품|관리|재고/.test(l.text))
+          .slice(0, 10)
+          .map((l) => `"${l.text.slice(0, 20)}" → ${l.href.slice(0, 80)}`);
         const otext = stripTags(
           oh.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, ''),
         );
@@ -740,6 +787,7 @@ const routes = {
           bytes: oh.length,
           orders: found.length,
           sample: found.slice(0, 2).map((o) => `${o.orderNo} ${o.buyer} ${o.items.map((i) => `${i.name} ${i.qty}개`).join(',')}`),
+          productLinks,
           textPreview: dateM
             ? otext.slice(Math.max(0, dateM.index - 100), dateM.index + 700)
             : otext.slice(0, 500) + '\n(날짜 형식의 주문을 찾지 못했습니다)',
@@ -756,6 +804,7 @@ const routes = {
       foundPostIds: wrIds,
       orderPage,
       productAdmin,
+      alps,
       editForm,
       posts,
     };
@@ -2085,6 +2134,34 @@ const server = http.createServer(async (req, res) => {
     console.log('\n  새 버전이 실행되어 이 창은 종료됩니다. 이 창은 닫으셔도 됩니다.\n');
     setTimeout(() => process.exit(0), 300);
     return undefined;
+  }
+
+  // 송장용 엑셀(CSV) 내려받기: 발송해야 하는 문자·스토어 수동 주문
+  if (pathname === '/api/export/shipping.csv') {
+    const targets = db.orders.filter((o) =>
+      (o.channel === 'sms' || o.channel === 'store')
+      && o.status !== 'canceled' && o.status !== 'shipped'
+      && o.address);
+    const rows = [['받는분', '전화번호', '주소', '품목', '수량합계', '메모']];
+    for (const o of targets) {
+      rows.push([
+        o.buyer,
+        o.phone,
+        o.address,
+        o.items.map((it) => `${it.name} ${it.qty}개`).join(', '),
+        String(o.items.reduce((s, it) => s + it.qty, 0)),
+        o.memo || '',
+      ]);
+    }
+    const csv = '﻿' + rows
+      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
+      .join('\r\n');
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="shipping.csv"',
+      'Cache-Control': 'no-store',
+    });
+    return res.end(csv);
   }
 
   if (!pathname.startsWith('/api/')) return serveStatic(req, res, pathname);

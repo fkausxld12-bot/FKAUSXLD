@@ -621,6 +621,9 @@ $('#runDiag').addEventListener('click', async () => {
         text += `오류: ${d.orderPage.error}\n`;
       } else {
         text += `응답: ${fmt(d.orderPage.bytes)}바이트 · 읽은 주문: ${d.orderPage.orders}건\n`;
+        if (d.orderPage.productLinks && d.orderPage.productLinks.length) {
+          text += `상품 관련 메뉴 링크:\n${d.orderPage.productLinks.map((l) => `  ${l}`).join('\n')}\n`;
+        }
         if (d.orderPage.sample && d.orderPage.sample.length) text += `주문 예시: ${d.orderPage.sample.join(' | ')}\n`;
         text += `내용 미리보기:\n${d.orderPage.textPreview}\n`;
       }
@@ -639,6 +642,18 @@ $('#runDiag').addEventListener('click', async () => {
       }
     } else {
       text += '\n(판매상품 관리 페이지를 아직 찾지 못했습니다 - 몇 분 뒤 다시 진단해 보세요)\n';
+    }
+    if (d.alps) {
+      text += '\n===== 롯데택배 파트너(ALPS) 분석 (송장 자동등록 준비) =====\n';
+      if (d.alps.error) {
+        text += `오류: ${d.alps.error}\n`;
+      } else {
+        text += `응답: ${d.alps.status} (${fmt(d.alps.bytes)}바이트) · 폼: ${d.alps.formAction}\n`;
+        if (d.alps.inputs && d.alps.inputs.length) text += `입력칸: ${d.alps.inputs.join(', ')}\n`;
+        if (d.alps.apiEndpoints && d.alps.apiEndpoints.length) {
+          text += `발견한 API 주소들:\n${d.alps.apiEndpoints.map((a) => `  ${a}`).join('\n')}\n`;
+        }
+      }
     }
     if (d.editForm) {
       text += '\n===== 판매글 수정 폼 분석 (읽기만, 재고 자동수정 준비용) =====\n';
