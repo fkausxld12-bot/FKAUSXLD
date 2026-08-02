@@ -40,8 +40,16 @@ const emptyDb = () => ({
   orders: [], // { id, no, channel, buyer, phone, address, memo, items, status, createdAt, shippedAt, printedAt }
   history: [], // 재고 변동/판매 기록
   orderSeq: 0,
-  // 농라(밴드) 연동 설정: developers.band.us 에서 발급받은 액세스 토큰
-  band: { accessToken: '', bandKey: '', bandName: '', processed: {} },
+  // 농라(farmer4989.com 그누보드 게시판) 연동 설정
+  nongra: {
+    base: '', // 예: https://farmer4989.com/gnuboard5
+    boTable: '', // 게시판 코드 (예: ymh14141)
+    wrId: 0, // 고정 글 번호 (followLatest=false일 때만 사용)
+    followLatest: true, // 항상 게시판의 최신 글을 추적
+    mbId: '', // 사이트 로그인 아이디 (비밀댓글 보기용, 선택)
+    mbPw: '',
+    processed: {}, // 처리한 댓글 key → 주문 id 또는 'skipped'
+  },
   updatedAt: new Date().toISOString(),
 });
 
@@ -56,7 +64,12 @@ function loadDb() {
       orders: Array.isArray(raw.orders) ? raw.orders : [],
       history: Array.isArray(raw.history) ? raw.history : [],
       orderSeq: Number(raw.orderSeq) || 0,
-      band: { ...base.band, ...(raw.band || {}) },
+      nongra: {
+        ...base.nongra,
+        ...(raw.nongra || {}),
+        // 이전 밴드 연동 버전에서 넘어온 처리 기록도 이어받습니다.
+        processed: { ...((raw.band || {}).processed || {}), ...((raw.nongra || {}).processed || {}) },
+      },
     };
   } catch {
     return emptyDb();
@@ -189,7 +202,14 @@ const routes = {
     products: db.products,
     orders: db.orders,
     history: db.history,
-    band: bandPublic(), // 토큰 자체는 내보내지 않습니다.
+    nongra: {
+      ...nongraPublic(), // 비밀번호는 내보내지 않습니다.
+      unprocessed: nongraUnprocessedCount(),
+      fetchedAt: nongraCache.fetchedAt,
+      error: nongraCache.error,
+      loggedIn: nongraCache.loggedIn,
+      postTitle: nongraCache.inbox.length ? nongraCache.inbox[0].title : '',
+    },
     updatedAt: db.updatedAt,
   }),
 
@@ -310,7 +330,7 @@ const routes = {
 
     // 농라 댓글에서 가져온 주문이면 해당 댓글을 처리됨으로 표시 (중복 방지)
     if (body.commentKey) {
-      db.band.processed[String(body.commentKey)] = order.id;
+      db.nongra.processed[String(body.commentKey)] = order.id;
     }
 
     logHistory('order', `주문 #${order.no} 등록 (${channelName(channel)}) - 재고 차감`);
@@ -375,65 +395,59 @@ const routes = {
     return { ok: true };
   },
 
-  /* ---------- 농라(밴드) 연동 ---------- */
+  /* ---------- 농라(farmer4989 게시판) 연동 ---------- */
 
-  'POST /api/band/settings': (body) => {
-    if (body.accessToken !== undefined) db.band.accessToken = String(body.accessToken).trim();
-    if (body.bandKey !== undefined) db.band.bandKey = String(body.bandKey).trim();
-    if (body.bandName !== undefined) db.band.bandName = String(body.bandName).trim();
-    return { band: bandPublic() };
-  },
-
-  // 토큰으로 가입된 밴드 목록 조회
-  'GET /api/band/bands': async () => {
-    const data = await bandGet('/v2.1/bands');
-    const bands = (data.bands || []).map((b) => ({ name: b.name, bandKey: b.band_key }));
-    return { bands };
-  },
-
-  // 선택한 밴드의 최근 글 + 댓글을 가져와 주문 후보로 보여줍니다.
-  'GET /api/band/inbox': async () => {
-    if (!db.band.bandKey) throw httpError(400, '연동할 밴드를 먼저 선택해 주세요.');
-    const data = await bandGet('/v2/band/posts', { band_key: db.band.bandKey, locale: 'ko_KR' });
-    const posts = (data.items || []).slice(0, 10);
-    const inbox = [];
-
-    for (const post of posts) {
-      const entry = {
-        postKey: post.post_key,
-        author: post.author ? post.author.name : '',
-        snippet: String(post.content || '').slice(0, 120),
-        createdAt: post.created_at || null,
-        commentCount: post.comment_count || 0,
-        comments: [],
-      };
-      if (post.comment_count > 0) {
-        try {
-          const cd = await bandGet('/v2/band/post/comments', {
-            band_key: db.band.bandKey,
-            post_key: post.post_key,
-          });
-          entry.comments = (cd.items || []).map((c) => ({
-            commentKey: String(c.comment_key),
-            author: c.author ? c.author.name : '',
-            content: String(c.content || ''),
-            createdAt: c.created_at || null,
-            processed: Boolean(db.band.processed[String(c.comment_key)]),
-          }));
-        } catch {
-          // 댓글 조회가 막힌 글은 글만 보여줍니다.
-        }
-      }
-      inbox.push(entry);
+  'POST /api/nongra/settings': async (body) => {
+    if (body.url !== undefined && String(body.url).trim()) {
+      const parsed = parseNongraUrl(body.url);
+      db.nongra.base = parsed.base;
+      db.nongra.boTable = parsed.boTable;
+      db.nongra.wrId = parsed.wrId;
+      db.nongra.followLatest = body.followLatest !== undefined ? Boolean(body.followLatest) : true;
+      nongraCache.inbox = [];
+      nongraCache.fetchedAt = null;
+      nongraCache.cookies = {};
+      nongraCache.loggedIn = false;
     }
-    return { inbox, bandName: db.band.bandName };
+    if (body.followLatest !== undefined) db.nongra.followLatest = Boolean(body.followLatest);
+    if (body.mbId !== undefined) {
+      db.nongra.mbId = String(body.mbId).trim();
+      db.nongra.mbPw = String(body.mbPw || '').trim();
+      nongraCache.cookies = {};
+      nongraCache.loggedIn = false;
+    }
+    // 설정이 바뀌면 바로 한 번 가져와서 화면에 보여줍니다.
+    if (db.nongra.base && db.nongra.boTable) await pollNongra(true);
+    if (nongraCache.error) throw httpError(502, `저장은 했지만 가져오기 실패: ${nongraCache.error}`);
+    return { nongra: nongraPublic() };
+  },
+
+  // 자동으로 모아둔 농라 글·댓글 (서버가 3분마다 갱신)
+  'GET /api/nongra/inbox': () => {
+    if (!db.nongra.base) throw httpError(400, '농라 게시글 주소를 먼저 저장해 주세요.');
+    return {
+      inbox: nongraInboxWithFlags(),
+      fetchedAt: nongraCache.fetchedAt,
+      error: nongraCache.error,
+    };
+  },
+
+  // 지금 바로 다시 가져오기
+  'POST /api/nongra/refresh': async () => {
+    if (!db.nongra.base) throw httpError(400, '농라 게시글 주소를 먼저 저장해 주세요.');
+    await pollNongra(true);
+    if (nongraCache.error) throw httpError(502, nongraCache.error);
+    return {
+      inbox: nongraInboxWithFlags(),
+      fetchedAt: nongraCache.fetchedAt,
+    };
   },
 
   // 댓글을 주문으로 만들지 않고 처리됨으로만 표시
-  'POST /api/band/skip': (body) => {
+  'POST /api/nongra/skip': (body) => {
     const key = String(body.commentKey || '').trim();
     if (!key) throw httpError(400, '댓글 정보가 없습니다.');
-    db.band.processed[key] = db.band.processed[key] || 'skipped';
+    db.nongra.processed[key] = db.nongra.processed[key] || 'skipped';
     return { ok: true };
   },
 
@@ -478,9 +492,9 @@ const routes = {
   },
 
   'POST /api/reset-all': () => {
-    const band = { ...db.band, processed: {} }; // 연동 설정은 남겨둡니다.
+    const nongra = { ...db.nongra, processed: {} }; // 연동 설정은 남겨둡니다.
     db = emptyDb();
-    db.band = band;
+    db.nongra = nongra;
     return { ok: true };
   },
 };
@@ -507,40 +521,238 @@ function channelName(channel) {
   return { nongra: '농라', store: '스토어', field: '현장' }[channel] || channel;
 }
 
-/* ---------------------------------------------------------------- 밴드 API */
+/* ------------------------------------------------- 농라(그누보드) 연동 */
 
-// 토큰은 화면에 다시 보내지 않고, 설정 여부만 알려줍니다.
-function bandPublic() {
+// 비밀번호는 화면으로 다시 보내지 않습니다.
+function nongraPublic() {
+  const n = db.nongra;
   return {
-    hasToken: Boolean(db.band.accessToken),
-    bandKey: db.band.bandKey,
-    bandName: db.band.bandName,
+    configured: Boolean(n.base && n.boTable),
+    base: n.base,
+    boTable: n.boTable,
+    wrId: n.wrId,
+    followLatest: n.followLatest,
+    hasLogin: Boolean(n.mbId),
   };
 }
 
-async function bandGet(apiPath, params) {
-  if (!db.band.accessToken) {
-    throw httpError(400, '농라(밴드) 액세스 토큰을 먼저 저장해 주세요. (연동 설정 참고)');
+// 붙여넣은 게시글/게시판 주소에서 사이트 주소·게시판 코드·글 번호를 뽑아냅니다.
+function parseNongraUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw).trim());
+  } catch {
+    throw httpError(400, '주소가 올바르지 않습니다. 게시글 주소를 그대로 붙여넣어 주세요.');
   }
-  const url = new URL('https://openapi.band.us' + apiPath);
-  url.searchParams.set('access_token', db.band.accessToken);
-  for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, v);
+  const boTable = url.searchParams.get('bo_table');
+  if (!boTable) throw httpError(400, '게시판 주소가 아닙니다. bo_table이 포함된 글 주소를 붙여넣어 주세요.');
+  const wrId = Number(url.searchParams.get('wr_id')) || 0;
+  // /gnuboard5/bbs/board.php → base는 /gnuboard5
+  const basePath = url.pathname.replace(/\/bbs\/[^/]*$/, '');
+  return { base: url.origin + basePath, boTable, wrId };
+}
 
+// 자동으로 가져온 농라 글·댓글 캐시. 화면은 이 캐시를 읽어갑니다.
+const nongraCache = {
+  inbox: [], // [{ postKey, title, snippet, commentCount, comments: [...] }]
+  fetchedAt: null,
+  error: '',
+  polling: false,
+  cookies: {}, // 로그인 세션 쿠키
+  loggedIn: false,
+};
+
+const NONGRA_POLL_MS = 3 * 60 * 1000; // 3분마다 자동 확인
+
+function nongraCookieHeader() {
+  return Object.entries(nongraCache.cookies).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+function nongraStoreCookies(res) {
+  const list = typeof res.headers.getSetCookie === 'function'
+    ? res.headers.getSetCookie()
+    : [res.headers.get('set-cookie')].filter(Boolean);
+  for (const line of list) {
+    const [pair] = line.split(';');
+    const eq = pair.indexOf('=');
+    if (eq > 0) nongraCache.cookies[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+  }
+}
+
+async function nongraFetch(url, options = {}) {
   let res;
   try {
-    res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    res = await fetch(url, {
+      redirect: 'manual',
+      ...options,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        Cookie: nongraCookieHeader(),
+        ...(options.headers || {}),
+      },
+      signal: AbortSignal.timeout(20000),
+    });
   } catch {
-    throw httpError(502, '밴드 서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.');
+    throw httpError(502, '농라 사이트에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.');
   }
-  const data = await res.json().catch(() => ({}));
-  if (data.result_code !== 1) {
-    const detail = (data.result_data && data.result_data.message) || `코드 ${data.result_code ?? res.status}`;
-    if (String(detail).includes('Invalid') || res.status === 401) {
-      throw httpError(401, '밴드 토큰이 올바르지 않거나 만료되었습니다. 연동 설정에서 다시 발급받아 주세요.');
+  nongraStoreCookies(res);
+  return res;
+}
+
+// 그누보드 로그인 (비밀댓글 확인용)
+async function nongraLogin() {
+  const n = db.nongra;
+  if (!n.mbId || !n.mbPw) return false;
+  const body = new URLSearchParams({
+    mb_id: n.mbId,
+    mb_password: n.mbPw,
+    url: n.base + '/',
+  });
+  const res = await nongraFetch(`${n.base}/bbs/login_check.php`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  // 성공하면 302로 되돌려보내고, 실패하면 안내 페이지(200)가 옵니다.
+  nongraCache.loggedIn = res.status >= 300 && res.status < 400;
+  return nongraCache.loggedIn;
+}
+
+function stripTags(html) {
+  return String(html)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim();
+}
+
+// 게시판 목록 페이지에서 가장 최신 글 번호를 찾습니다.
+function parseLatestWrId(html, boTable) {
+  let latest = 0;
+  const re = new RegExp(`bo_table=${boTable}(?:&(?:amp;)?[^"'\\s]*)?&(?:amp;)?wr_id=(\\d+)`, 'g');
+  let m;
+  while ((m = re.exec(html))) latest = Math.max(latest, Number(m[1]));
+  return latest;
+}
+
+// 그누보드5 글 페이지에서 제목과 댓글 목록을 뽑아냅니다.
+function parsePost(html, wrId) {
+  const titleMatch = html.match(/<span[^>]*class="[^"]*bo_v_tit[^"]*"[^>]*>([\s\S]*?)<\/span>/)
+    || html.match(/<h1[^>]*id="bo_v_title"[^>]*>([\s\S]*?)<\/h1>/)
+    || html.match(/<title>([\s\S]*?)<\/title>/);
+  const title = titleMatch ? stripTags(titleMatch[1]) : `글 ${wrId}`;
+
+  const comments = [];
+  // 댓글 블록: <article id="c_12345" ...> ... (다음 댓글 전까지)
+  const blocks = html.split(/<article[^>]*id="c_(\d+)"/).slice(1);
+  for (let i = 0; i < blocks.length; i += 2) {
+    const commentId = blocks[i];
+    const block = blocks[i + 1] || '';
+
+    // 작성자: sv_member(회원) / sv_guest(손님) / member 클래스 순으로 찾습니다.
+    const authorMatch = block.match(/class="[^"]*sv_member[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/)
+      || block.match(/class="[^"]*sv_guest[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/)
+      || block.match(/class="[^"]*\bmember\b[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/);
+    const author = authorMatch ? stripTags(authorMatch[1]) : '';
+
+    const timeMatch = block.match(/datetime="([^"]+)"/)
+      || block.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/)
+      || block.match(/(\d{2}-\d{2} \d{2}:\d{2})/);
+
+    // 내용: id="comment-12345-content" div가 표준입니다.
+    const contentMatch = block.match(
+      new RegExp(`id="comment-${commentId}-content"[^>]*>([\\s\\S]*?)</div>`),
+    ) || block.match(/class="[^"]*cmt_contents[^"]*"[^>]*>([\s\S]*?)<\/div>/);
+    let content = contentMatch ? stripTags(contentMatch[1]) : '';
+
+    const secret = /비밀글|secret/i.test(block) && !content.replace(/비밀글\s*입니다\.?/g, '').trim();
+    if (secret) content = content || '🔒 비밀댓글입니다.';
+    if (!content) continue;
+
+    comments.push({
+      commentKey: `${wrId}c${commentId}`,
+      author,
+      content,
+      createdAt: timeMatch ? timeMatch[1] : null,
+      secret,
+    });
+  }
+  return { title, comments };
+}
+
+async function pollNongra(force = false) {
+  const n = db.nongra;
+  if (!n.base || !n.boTable || nongraCache.polling) return;
+  nongraCache.polling = true;
+  try {
+    // 로그인 정보가 있고 아직 세션이 없으면 로그인부터
+    if (n.mbId && !nongraCache.loggedIn) await nongraLogin().catch(() => {});
+
+    // 추적할 글 번호 결정: 항상 최신 글 or 고정 글
+    let wrId = n.wrId;
+    if (n.followLatest || !wrId) {
+      const listRes = await nongraFetch(`${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}`);
+      const listHtml = await listRes.text();
+      const latest = parseLatestWrId(listHtml, n.boTable);
+      if (latest) wrId = latest;
     }
-    throw httpError(502, `밴드 응답 오류: ${detail}`);
+    if (!wrId) throw httpError(502, '게시판에서 글을 찾지 못했습니다. 주소를 확인해 주세요.');
+
+    const postRes = await nongraFetch(
+      `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`,
+    );
+    const postHtml = await postRes.text();
+    const { title, comments } = parsePost(postHtml, wrId);
+
+    // 세션이 만료되어 비밀댓글이 다시 잠겼으면 한 번 재로그인 후 재시도
+    if (n.mbId && comments.some((c) => c.secret) && nongraCache.loggedIn === false && !force) {
+      await nongraLogin().catch(() => {});
+    }
+
+    nongraCache.inbox = [{
+      postKey: String(wrId),
+      title,
+      snippet: title,
+      commentCount: comments.length,
+      comments,
+    }];
+    nongraCache.fetchedAt = new Date().toISOString();
+    nongraCache.error = '';
+  } catch (err) {
+    nongraCache.error = err.message || '농라 사이트 조회 실패';
+  } finally {
+    nongraCache.polling = false;
   }
-  return data.result_data || {};
+}
+
+setInterval(() => pollNongra(false), NONGRA_POLL_MS);
+setTimeout(() => pollNongra(true), 3000); // 서버 시작 3초 후 첫 확인
+
+function nongraUnprocessedCount() {
+  let count = 0;
+  for (const post of nongraCache.inbox) {
+    for (const c of post.comments) {
+      if (!db.nongra.processed[c.commentKey]) count += 1;
+    }
+  }
+  return count;
+}
+
+function nongraInboxWithFlags() {
+  return nongraCache.inbox.map((post) => ({
+    ...post,
+    comments: post.comments.map((c) => ({
+      ...c,
+      processed: Boolean(db.nongra.processed[c.commentKey]),
+    })),
+  }));
 }
 
 /* ---------------------------------------------------------------- 서버 */
