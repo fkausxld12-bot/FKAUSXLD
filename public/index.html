@@ -142,22 +142,29 @@
           <option value="field">현장 판매만</option>
           <option value="shipped">완료됨</option>
         </select>
-        <button type="button" class="primary" id="toggleOrderForm">＋ 스토어 주문</button>
+        <button type="button" class="primary" id="toggleOrderForm">＋ 문자·스토어 주문</button>
       </div>
     </div>
 
     <form class="order-form hidden" id="orderForm">
-      <p class="hint">스토어 자동 연동을 쓰면 이 붙여넣기는 필요 없습니다. 자동으로 안 들어온 주문만 여기로 직접 등록하세요.</p>
+      <p class="hint">문자로 온 주문을 여기에 넣으면 주문·수량·매출에 바로 잡힙니다.
+        품목은 "상품명 수량개"만 쓰면 가격은 농라F 상품에서 자동으로 채워집니다.</p>
       <div class="form-grid">
+        <label>구분
+          <select id="ofChannel">
+            <option value="sms">문자 주문</option>
+            <option value="store">스토어 주문</option>
+          </select>
+        </label>
         <label>주문자 <input id="ofBuyer" placeholder="이름" autocomplete="off" /></label>
         <label>연락처 <input id="ofPhone" placeholder="010-0000-0000" autocomplete="off" /></label>
-        <label>주소 <input id="ofAddress" placeholder="배송지" autocomplete="off" /></label>
-        <label class="wide">품목 (한 줄에 하나)
-          <textarea id="ofItems" rows="3" placeholder="유스커스(3개) 9,000원&#10;장미)자나(sp)(1개) 6,000원"></textarea>
+        <label class="wide">주소 <input id="ofAddress" placeholder="배송지" autocomplete="off" /></label>
+        <label class="wide">품목 (한 줄에 하나, 가격 자동)
+          <textarea id="ofItems" rows="3" placeholder="장미)원탑(sp) 2개&#10;국화)다이아몬드 1개"></textarea>
         </label>
       </div>
       <div class="adder-actions">
-        <button type="submit" class="primary">등록</button>
+        <button type="submit" class="primary">등록 (수량·매출 자동 반영)</button>
         <button type="button" class="ghost" id="cancelOrderForm">닫기</button>
       </div>
     </form>

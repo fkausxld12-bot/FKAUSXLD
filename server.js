@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v22'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v23'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -47,7 +47,7 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
-const CHANNELS = ['nongra', 'store', 'field']; // 농라 / 스토어 / 현장
+const CHANNELS = ['nongra', 'store', 'field', 'sms']; // 농라 / 스토어 / 현장 / 문자
 const STATUSES = ['new', 'paid', 'ready', 'shipped', 'canceled'];
 
 /* ---------------------------------------------------------------- 저장소 */
@@ -65,6 +65,7 @@ const emptyDb = () => ({
     followLatest: true, // 항상 게시판의 최신 글을 추적
     short: false, // 짧은 주소(/게시판코드/글번호) 형식 사이트인지
     orderPageUrl: '', // 판매자용 주문배송 페이지 (자동 발견)
+    productAdminUrl: '', // 판매상품 관리 페이지 (자동 발견, 재고 자동수정용)
     lastTopWrId: 0, // 마지막으로 본 최신 글 번호 (새 판매글 감지용)
     mbId: '', // 사이트 로그인 아이디 (비밀댓글 보기용, 선택)
     mbPw: '',
@@ -454,6 +455,14 @@ const routes = {
     const normalized = normalizeOrderItems(items);
     if (!normalized.length) throw httpError(400, '주문 품목이 필요합니다.');
 
+    // 가격이 비어 있으면 농라F 동기화 상품의 개당가로 채웁니다. (문자 주문 등)
+    for (const it of normalized) {
+      if (!it.price) {
+        const unit = salesUnitPriceOf(it.name);
+        if (unit) it.price = unit * it.qty;
+      }
+    }
+
     adjustStock(normalized, +1); // 주문이 잡히면 재고에서 미리 뺍니다.
 
     db.orderSeq += 1;
@@ -681,6 +690,36 @@ const routes = {
       }
     }
 
+    // 판매상품 관리 페이지 분석 (읽기 전용 - 재고 자동수정 만들기 위한 구조 확인)
+    let productAdmin = null;
+    if (db.nongra.productAdminUrl) {
+      try {
+        const { html: ph } = await nongraFetchPage(db.nongra.productAdminUrl);
+        const formM = ph.match(/<form[^>]*action=["']([^"']+)["'][^>]*>/i);
+        const fields = [];
+        const fre = /<(input|select|textarea)\b[^>]*name=["']([^"']+)["'][^>]*>/gi;
+        let fm;
+        while ((fm = fre.exec(ph)) && fields.length < 80) {
+          const valueM = fm[0].match(/value=["']([^"']{0,30})/);
+          fields.push(`${fm[2]}${valueM && valueM[1] ? `=${valueM[1]}` : ''}`);
+        }
+        const ptext = stripTags(ph.replace(/<script[\s\S]*?<\/script>/gi, ''));
+        const sIdx = ptext.indexOf('재고');
+        // 재고 입력칸 주변 원본 코드도 함께
+        const rawIdx = ph.indexOf('재고');
+        productAdmin = {
+          url: db.nongra.productAdminUrl,
+          bytes: ph.length,
+          action: formM ? formM[1] : '(폼 없음)',
+          fields,
+          textAroundStock: sIdx >= 0 ? ptext.slice(Math.max(0, sIdx - 80), sIdx + 300) : '(재고 글자 없음)',
+          rawAroundStock: rawIdx >= 0 ? ph.slice(Math.max(0, rawIdx - 200), rawIdx + 400).replace(/\s+/g, ' ') : '',
+        };
+      } catch (err) {
+        productAdmin = { url: db.nongra.productAdminUrl, error: err.message };
+      }
+    }
+
     // 주문배송 페이지가 발견됐으면 그 페이지도 진단합니다.
     let orderPage = null;
     if (db.nongra.orderPageUrl) {
@@ -712,6 +751,7 @@ const routes = {
       listSize: listHtml.length,
       foundPostIds: wrIds,
       orderPage,
+      productAdmin,
       editForm,
       posts,
     };
@@ -792,7 +832,7 @@ function setStatus(order, status) {
 }
 
 function channelName(channel) {
-  return { nongra: '농라', store: '스토어', field: '현장' }[channel] || channel;
+  return { nongra: '농라', store: '스토어', field: '현장', sms: '문자' }[channel] || channel;
 }
 
 /* ------------------------------------------------- 농라(그누보드) 연동 */
@@ -933,21 +973,26 @@ function findLinks(html) {
   return out;
 }
 
-// 페이지에서 판매자용 "주문배송/주문내역" 메뉴 주소를 찾아 기억해 둡니다.
+// 페이지에서 판매자용 메뉴(주문배송·판매상품 관리) 주소를 찾아 기억해 둡니다.
 function discoverOrderPage(html, baseUrl) {
-  if (db.nongra.orderPageUrl) return;
-  const link = findLinks(html).find((l) => /주문배송|주문내역|주문관리/.test(l.text));
-  if (!link) return;
-  try {
-    const abs = new URL(link.href, baseUrl);
-    if (abs.host === new URL(db.nongra.base).host) {
-      db.nongra.orderPageUrl = abs.toString();
-      logHistory('order', `농라F 주문배송 페이지 발견: ${abs.pathname}`);
-      save();
+  const links = findLinks(html);
+  const remember = (field, pattern, what) => {
+    if (db.nongra[field]) return;
+    const link = links.find((l) => pattern.test(l.text));
+    if (!link) return;
+    try {
+      const abs = new URL(link.href, baseUrl);
+      if (abs.host === new URL(db.nongra.base).host) {
+        db.nongra[field] = abs.toString();
+        logHistory('order', `농라F ${what} 페이지 발견: ${abs.pathname}`);
+        save();
+      }
+    } catch {
+      /* 잘못된 링크는 무시 */
     }
-  } catch {
-    /* 잘못된 링크는 무시 */
-  }
+  };
+  remember('orderPageUrl', /주문배송|주문내역|주문관리/, '주문배송');
+  remember('productAdminUrl', /판매상품\s*관리|상품\s*관리|판매상품/, '판매상품 관리');
 }
 
 /**
@@ -1191,6 +1236,13 @@ function parseSalesWidget(html) {
  *   장미)비포썬셋(sp) (1 개)
  *   22,000 원
  */
+// 농라F 판매 페이지에서 동기화된 상품의 개당 가격을 찾습니다.
+function salesUnitPriceOf(name) {
+  const key = String(name).replace(/\s+/g, '');
+  const p = nongraCache.sales.products.find((x) => x.name.replace(/\s+/g, '') === key);
+  return p ? p.price : 0;
+}
+
 // 운송장(송장번호)이 붙었는지 판별합니다. 전화번호(01x…)는 제외합니다.
 function isTrackingLine(line) {
   if (/invno|tracking|운송장\s*[:번]/.test(line)) return true;
