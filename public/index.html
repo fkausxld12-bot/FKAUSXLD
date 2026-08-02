@@ -89,28 +89,32 @@
       </div>
       <div class="adder hidden" id="bandSetup">
         <p class="hint">
-          ① <b>band.us</b>에 로그인한 브라우저에서 <b>developers.band.us</b> 접속 →
-          상단 <b>개발자 등록</b> → <b>Access Token 발급</b>에서 토큰을 복사해 아래에 붙여넣으세요.<br />
-          ② 저장 후 <b>밴드 불러오기</b>를 눌러 주문 받는 밴드를 선택하면 끝!
+          ① 농라(farmer4989.com)에서 <b>내 판매글</b>을 연 다음, 주소창의 주소를 그대로 복사해 붙여넣으세요.<br />
+          ② 새 판매글을 올려도 <b>자동으로 최신 글</b>을 따라갑니다.<br />
+          ③ 비밀댓글까지 보려면 농라 사이트 아이디/비밀번호도 저장하세요. (내 컴퓨터에만 저장됩니다)
         </p>
-        <input id="bandToken" placeholder="밴드 Access Token 붙여넣기" autocomplete="off" />
+        <input id="nongraUrl" placeholder="예: https://farmer4989.com/gnuboard5/bbs/board.php?bo_table=ymh14141&wr_id=49" autocomplete="off" />
+        <div class="form-grid" style="margin-top:8px">
+          <label>농라 아이디 (선택) <input id="nongraId" autocomplete="off" /></label>
+          <label>농라 비밀번호 (선택) <input id="nongraPw" type="password" autocomplete="off" /></label>
+          <label class="check" style="align-self:end"><input type="checkbox" id="nongraFollow" checked /> 항상 최신 글 따라가기</label>
+        </div>
         <div class="adder-actions">
-          <button type="button" class="primary" id="saveBandToken">토큰 저장</button>
-          <button type="button" class="ghost" id="loadBands">밴드 불러오기</button>
-          <select id="bandSelect" class="hidden"></select>
+          <button type="button" class="primary" id="saveNongra">저장하고 연동 시작</button>
         </div>
         <p class="hint" id="bandStatus"></p>
       </div>
 
       <div class="panel-head">
         <h2 id="bandInboxTitle">밴드 새 글·댓글</h2>
-        <button type="button" class="primary" id="bandRefresh">↻ 새로 가져오기</button>
+        <button type="button" class="primary" id="bandRefresh">↻ 지금 바로 확인</button>
       </div>
       <div id="bandInbox"></div>
-      <p class="empty" id="emptyBand">아직 가져온 내용이 없습니다. 연동 설정 후 <b>새로 가져오기</b>를 눌러 주세요.</p>
+      <p class="empty" id="emptyBand">아직 가져온 내용이 없습니다. 연동을 마치면 자동으로 나타납니다.</p>
     </div>
-    <p class="note">※ 댓글의 <b>주문 등록</b>을 누르면 내용이 주문 폼에 채워집니다. 주소·연락처만 확인하고 등록하세요.
-       스마트스토어 자동 연동은 커머스 API 승인 후 추가할 수 있습니다.</p>
+    <p class="note">※ 연동 후에는 <b>3분마다 자동으로</b> 판매글의 새 댓글을 확인하고, 새 댓글이 오면 알림음과 함께 알려줍니다.
+       댓글의 <b>주문 등록</b>을 누르면 내용이 주문 폼에 채워지고 등록하면 재고가 빠집니다.
+       스마트스토어(sell.smartstore.naver.com)는 로그인 보안 때문에 네이버 커머스 API 승인 후 연동할 수 있습니다.</p>
   </section>
 
   <!-- ========================== 현장 판매 계산기 ========================== -->
