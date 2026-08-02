@@ -5,9 +5,11 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
-let state = { products: [], orders: [], history: [] };
+let state = { products: [], orders: [], history: [], band: {} };
 let cart = []; // { productId, name, qty, unitPrice }
 let toastTimer = null;
+let bandInbox = []; // 마지막으로 가져온 밴드 글·댓글
+let pendingCommentKey = null; // 주문 폼에 채워 넣은 밴드 댓글
 
 const CHANNEL_NAME = { nongra: '농라', store: '스토어', field: '현장' };
 const STATUS_NAME = { new: '신규', paid: '입금확인', ready: '발송대기', shipped: '발송완료', canceled: '취소' };
@@ -84,6 +86,7 @@ function render() {
   renderStock();
   renderHistory();
   renderInvoicePick();
+  renderBandStatus();
 }
 
 function isToday(iso) {
@@ -123,6 +126,8 @@ function orderMatchesFilter(order, filter) {
     case 'all': return true;
     case 'active': return order.status !== 'shipped' && order.status !== 'canceled';
     case 'shipped': return order.status === 'shipped';
+    case 'unprinted':
+      return order.channel !== 'field' && order.status !== 'canceled' && !order.printedAt;
     default: return order.channel === filter;
   }
 }
@@ -141,9 +146,14 @@ function renderOrders() {
     const total = order.items.reduce((s, it) => s + it.price, 0);
     const top = document.createElement('div');
     top.className = 'order-top';
+    const printedChip = order.channel === 'field' || order.status === 'canceled' ? ''
+      : (order.printedAt
+        ? '<span class="chip printed">송장 ✓</span>'
+        : '<span class="chip unprinted">송장 미출력</span>');
     top.innerHTML = `
       <span class="chip ${order.channel}">${CHANNEL_NAME[order.channel] || order.channel}</span>
       <span class="chip status-${order.status}">${STATUS_NAME[order.status] || order.status}</span>
+      ${printedChip}
       <span class="buyer">${escapeHtml(order.buyer || '(이름 없음)')}</span>
       <span class="no">#${order.no} · ${timeText(order.createdAt)}</span>
       <span class="total">${won(total)}</span>`;
@@ -439,14 +449,19 @@ function renderInvoicePick() {
     const check = document.createElement('input');
     check.type = 'checkbox';
     check.dataset.id = order.id;
-    check.checked = checkedBefore.size === 0 || checkedBefore.has(order.id);
+    // 처음에는 송장을 아직 안 뽑은 주문만 체크해 둡니다.
+    check.checked = checkedBefore.size === 0 ? !order.printedAt : checkedBefore.has(order.id);
 
+    const printedChip = order.printedAt
+      ? '<span class="chip printed">송장 ✓</span>'
+      : '<span class="chip unprinted">송장 미출력</span>';
     const info = document.createElement('div');
     info.className = 'inv-info';
     info.innerHTML = `
       <div><b>${escapeHtml(order.buyer || '(이름 없음)')}</b>
         <span class="chip ${order.channel}">${CHANNEL_NAME[order.channel]}</span>
-        <span class="chip status-${order.status}">${STATUS_NAME[order.status]}</span></div>
+        <span class="chip status-${order.status}">${STATUS_NAME[order.status]}</span>
+        ${printedChip}</div>
       <div class="inv-sub">${escapeHtml([order.phone, order.address].filter(Boolean).join(' | ') || '주소 없음')}</div>
       <div class="inv-sub">${escapeHtml(order.items.map((it) => `${it.name} ${it.qty}개`).join(' · '))}</div>`;
 
@@ -479,11 +494,16 @@ $('#printInvoices').addEventListener('click', async () => {
 
   window.print();
 
+  // 출력한 주문에 "송장 출력됨" 표시를 남깁니다.
+  await act(() => api('/api/orders/printed', { method: 'POST', body: JSON.stringify({ ids }) }));
+
   if ($('#markShipped').checked) {
     await act(
       () => api('/api/orders/ship', { method: 'POST', body: JSON.stringify({ ids }) }),
-      (r) => `${r.shipped}건을 발송 완료로 바꿨습니다.`,
+      (r) => `${r.shipped}건 송장 출력 + 발송 완료 처리했습니다.`,
     );
+  } else {
+    toast(`${ids.length}건 송장 출력됨으로 표시했습니다.`);
   }
 });
 
@@ -509,9 +529,16 @@ $('#orderForm').addEventListener('submit', async (e) => {
       address: $('#ofAddress').value,
       memo: $('#ofMemo').value,
       itemsText,
+      commentKey: pendingCommentKey, // 농라 댓글에서 온 주문이면 중복 방지 표시
     }),
   }));
   if (result) {
+    if (pendingCommentKey) {
+      const c = findInboxComment(pendingCommentKey);
+      if (c) c.processed = true;
+      pendingCommentKey = null;
+      renderBandInbox();
+    }
     ['#ofBuyer', '#ofPhone', '#ofAddress', '#ofItems', '#ofMemo'].forEach((s) => { $(s).value = ''; });
     $('#orderForm').classList.add('hidden');
     toast(`주문 #${result.order.no} 등록 완료 (재고 차감됨)`);
@@ -519,6 +546,142 @@ $('#orderForm').addEventListener('submit', async (e) => {
 });
 
 $('#orderFilter').addEventListener('change', renderOrders);
+
+/* ---------- 농라(밴드) 연동 ---------- */
+
+function findInboxComment(commentKey) {
+  for (const post of bandInbox) {
+    const c = post.comments.find((x) => x.commentKey === commentKey);
+    if (c) return c;
+  }
+  return null;
+}
+
+function renderBandStatus() {
+  const b = state.band || {};
+  const status = $('#bandStatus');
+  if (!b.hasToken) {
+    status.textContent = '아직 토큰이 저장되지 않았습니다.';
+  } else if (!b.bandKey) {
+    status.textContent = '토큰 저장됨. "밴드 불러오기"를 눌러 밴드를 선택해 주세요.';
+  } else {
+    status.textContent = `연동 중인 밴드: ${b.bandName || b.bandKey}`;
+  }
+  $('#bandInboxTitle').textContent = b.bandName ? `${b.bandName} 새 글·댓글` : '밴드 새 글·댓글';
+}
+
+function renderBandInbox() {
+  const box = $('#bandInbox');
+  box.innerHTML = '';
+  $('#emptyBand').classList.toggle('hidden', bandInbox.length > 0);
+
+  let unprocessed = 0;
+  for (const post of bandInbox) {
+    const wrap = document.createElement('div');
+    wrap.className = 'band-post';
+
+    const head = document.createElement('div');
+    head.className = 'band-post-head';
+    head.innerHTML = `<b>${escapeHtml(post.author || '글')}</b>
+      <span class="when">${post.createdAt ? timeText(new Date(post.createdAt).toISOString()) : ''}</span>
+      <div class="band-snippet">${escapeHtml(post.snippet)}</div>`;
+    wrap.appendChild(head);
+
+    for (const c of post.comments) {
+      if (!c.processed) unprocessed += 1;
+      const row = document.createElement('div');
+      row.className = 'band-comment' + (c.processed ? ' done' : '');
+      const text = document.createElement('div');
+      text.className = 'band-comment-text';
+      text.innerHTML = `<b>${escapeHtml(c.author)}</b> ${escapeHtml(c.content)}
+        <span class="when">${c.createdAt ? timeText(new Date(c.createdAt).toISOString()) : ''}${c.processed ? ' · 처리됨' : ''}</span>`;
+      row.appendChild(text);
+
+      if (!c.processed) {
+        const actions = document.createElement('div');
+        actions.className = 'row-gap';
+        const importBtn = document.createElement('button');
+        importBtn.type = 'button';
+        importBtn.className = 'primary';
+        importBtn.textContent = '주문 등록';
+        importBtn.addEventListener('click', () => importBandComment(c));
+        actions.append(importBtn, toolBtn('무시', () => skipBandComment(c)));
+        row.appendChild(actions);
+      }
+      wrap.appendChild(row);
+    }
+    box.appendChild(wrap);
+  }
+  setBadge('#badgeBand', unprocessed);
+}
+
+// 댓글 내용을 주문 폼에 채우고 주문 탭으로 이동합니다.
+function importBandComment(comment) {
+  pendingCommentKey = comment.commentKey;
+  $('#ofChannel').value = 'nongra';
+  $('#ofBuyer').value = comment.author || '';
+  $('#ofItems').value = comment.content || '';
+  $('#ofMemo').value = '농라 댓글에서 가져옴';
+  $('#orderForm').classList.remove('hidden');
+  $$('.tab').find((t) => t.dataset.tab === 'home').click();
+  $('#ofPhone').focus();
+  toast('댓글 내용을 채웠습니다. 품목·연락처·주소를 확인하고 등록하세요.');
+}
+
+function skipBandComment(comment) {
+  act(async () => {
+    await api('/api/band/skip', { method: 'POST', body: JSON.stringify({ commentKey: comment.commentKey }) });
+    comment.processed = true;
+    renderBandInbox();
+  });
+}
+
+$('#toggleBandSetup').addEventListener('click', () => $('#bandSetup').classList.toggle('hidden'));
+
+$('#saveBandToken').addEventListener('click', () => {
+  const token = $('#bandToken').value.trim();
+  if (!token) return toast('토큰을 붙여넣어 주세요.', true);
+  act(async () => {
+    await api('/api/band/settings', { method: 'POST', body: JSON.stringify({ accessToken: token }) });
+    $('#bandToken').value = '';
+    renderBandStatus();
+  }, '토큰을 저장했습니다. 이제 "밴드 불러오기"를 눌러 주세요.');
+});
+
+$('#loadBands').addEventListener('click', async () => {
+  const result = await act(() => api('/api/band/bands'));
+  if (!result) return;
+  const select = $('#bandSelect');
+  select.innerHTML = '<option value="">밴드를 선택하세요</option>' +
+    result.bands.map((b) => `<option value="${escapeHtml(b.bandKey)}">${escapeHtml(b.name)}</option>`).join('');
+  select.classList.remove('hidden');
+  toast(`가입한 밴드 ${result.bands.length}개를 찾았습니다. 주문 받는 밴드를 선택하세요.`);
+});
+
+$('#bandSelect').addEventListener('change', async (e) => {
+  const bandKey = e.target.value;
+  if (!bandKey) return;
+  const bandName = e.target.options[e.target.selectedIndex].textContent;
+  await act(
+    () => api('/api/band/settings', { method: 'POST', body: JSON.stringify({ bandKey, bandName }) }),
+    `"${bandName}" 밴드와 연동했습니다.`,
+  );
+  renderBandStatus();
+});
+
+$('#bandRefresh').addEventListener('click', async () => {
+  const btn = $('#bandRefresh');
+  btn.disabled = true;
+  btn.textContent = '가져오는 중…';
+  const result = await act(() => api('/api/band/inbox'));
+  btn.disabled = false;
+  btn.textContent = '↻ 새로 가져오기';
+  if (!result) return;
+  bandInbox = result.inbox || [];
+  renderBandInbox();
+  const comments = bandInbox.reduce((s, p) => s + p.comments.filter((c) => !c.processed).length, 0);
+  toast(comments ? `처리 안 된 댓글이 ${comments}개 있습니다.` : '새로 처리할 댓글이 없습니다.');
+});
 
 /* ---------- 재고 등록 폼 ---------- */
 
