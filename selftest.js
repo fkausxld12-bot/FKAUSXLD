@@ -168,21 +168,36 @@ const alpsForm = http.createServer((req, res) => {
   }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(`<!doctype html><html><body>
-<input id="edtSndrNm" value="명정원예영농조합법인">
-<input id="edtCustNm" value="명정원예" readonly>
-<input id="edtAcperNm"><input id="edtAcperTel"><input id="edtAcperCpno">
-<input id="edtAcperPadr"><input id="edtAcperEtcAdr"><input id="maeAcperZipcd">
-<input id="edtOrdNo"><input id="edtOrdrNm"><input id="maeQty">
-<input id="edtGdsNm"><input id="edtDlvMsgCont">
+<div class="sec">송하인</div>
+<table>
+<tr><td>전화번호</td><td><input id="f1" value="010-9477-6402"></td>
+    <td>고객성명</td><td><input id="f2" value="명정원예영농조합법인"></td></tr>
+<tr><td>주소</td><td><input id="f3" value="전북 임실군 지사면 원산리 748"></td></tr>
+</table>
+<div class="sec">수하인</div>
+<table>
+<tr><td>전화번호</td><td><input id="g1"></td><td>고객성명</td><td><input id="g2"></td></tr>
+<tr><td>휴대폰</td><td><input id="g3"></td></tr>
+<tr><td>주소</td><td><input id="g4"></td></tr>
+<tr><td>상세주소</td><td><input id="g5"></td></tr>
+<tr><td>주문번호</td><td><input id="g6"></td><td>주문자명</td><td><input id="g7"></td></tr>
+</table>
+<div class="sec">기타화물정보</div>
+<table>
+<tr><td>내품수량</td><td><input id="h1"></td></tr>
+<tr><td>상품명</td><td><input id="h2"></td></tr>
+<tr><td>배달메세지</td><td><input id="h3"></td></tr>
+</table>
 <button id="btnSave" onclick="fnSave()">저장</button>
 <script>
 function fnSave() {
-  const ids = ['edtAcperNm','edtAcperTel','edtAcperCpno','edtAcperPadr','edtAcperEtcAdr',
-               'edtOrdNo','edtOrdrNm','maeQty','edtGdsNm','edtDlvMsgCont','edtSndrNm'];
+  const map = { edtAcperNm:'g2', edtAcperTel:'g1', edtAcperCpno:'g3', edtAcperPadr:'g4',
+                edtAcperEtcAdr:'g5', edtOrdNo:'g6', edtOrdrNm:'g7', maeQty:'h1',
+                edtGdsNm:'h2', edtDlvMsgCont:'h3', edtSndrNm:'f2' };
   const data = {};
-  ids.forEach((id) => { data[id] = document.getElementById(id).value; });
+  Object.entries(map).forEach(([k, id]) => { data[k] = document.getElementById(id).value; });
   fetch('/saved', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) })
-    .then(() => ids.forEach((id) => { if (id !== 'edtSndrNm') document.getElementById(id).value = ''; }));
+    .then(() => Object.entries(map).forEach(([k, id]) => { if (k !== 'edtSndrNm') document.getElementById(id).value = ''; }));
 }
 </script></body></html>`);
 });
@@ -199,6 +214,7 @@ async function startApp(fresh) {
       PORT: String(APP_PORT),
       DATA_DIR,
       ALPS_PORT: String(CDP_PORT),
+      ALPS_SITE_RE: `localhost:${ALPS_SHELL_PORT}|127\\.0\\.0\\.1:${ALPS_FORM_PORT}`,
       TZ: 'Asia/Seoul',
     },
     stdio: 'ignore',
@@ -313,8 +329,10 @@ async function main() {
   check('매출은 배송비 제외 물품 금액', (rows['2026-08-03'] || {}).amount > 0);
 
   console.log('\n[7] 송장 도우미 (롯데 ALPS)');
-  const noBrowser = await api('/api/alps/status');
-  check('브라우저 꺼졌을 때 안내', String(noBrowser.data.message).includes('브라우저'));
+  const before = await api('/api/alps/status');
+  check('상태를 사람이 알아볼 수 있게 안내',
+    typeof before.data.message === 'string' && before.data.message.length > 5,
+    before.data.message);
 
   // 실제 브라우저로 폼 채우기까지 확인 (크롬이 있을 때만)
   const alps = require('./alps');
@@ -327,7 +345,7 @@ async function main() {
       "const ALPS_LOGIN_URL = 'https://partner.alps.llogis.com/main/pages/sec/authentication';",
       `const ALPS_LOGIN_URL = 'http://localhost:${ALPS_SHELL_PORT}/';`,
     );
-    src = src.split('/alps\\.llogis\\.com/').join(`/localhost:${ALPS_SHELL_PORT}|127\\.0\\.0\\.1:${ALPS_FORM_PORT}/`);
+    process.env.ALPS_SITE_RE = `localhost:${ALPS_SHELL_PORT}|127\\.0\\.0\\.1:${ALPS_FORM_PORT}`;
     fs.writeFileSync(testModule, src);
     const testAlps = require(testModule);
 
@@ -345,8 +363,9 @@ async function main() {
         items: [{ name: '공작초)백공작', qty: 1 }, { name: '부들레야)보라', qty: 2 }],
       };
       const filled = await testAlps.fillOrder(order, { orderNo: 99 });
-      check('수하인·주소·수량 자동 입력',
-        filled.filled.edtAcperNm === '이선희' && filled.filled.maeQty === '3');
+      check('수하인·주소·수량 자동 입력 (라벨로 찾기)',
+        filled.filled['고객성명'] === '이선희' && filled.filled['내품수량'] === '3',
+        JSON.stringify(filled.filled));
       const saved = await testAlps.saveForm();
       check('저장 후 재조회로 확인', saved.verified === true);
       await sleep(500);

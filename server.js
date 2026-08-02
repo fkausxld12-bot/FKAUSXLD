@@ -17,7 +17,7 @@ const path = require('path');
 const os = require('os');
 const alps = require('./alps');
 
-const APP_VERSION = 'v26'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v27'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -889,6 +889,13 @@ const routes = {
   },
 
   'GET /api/alps/status': async () => alps.status(),
+
+  // 송장 화면에 어떤 칸이 있는지 그대로 보여줍니다 (문제 확인용)
+  'GET /api/alps/scan': async () => {
+    const fields = await alps.scanScreen();
+    if (!fields) throw httpError(400, '송장 화면을 찾지 못했습니다. 먼저 [송장 창 열기] 후 로그인해 주세요.');
+    return { fields };
+  },
 
   // 주문 하나를 송장 폼에 채웁니다. (저장은 하지 않습니다)
   'POST /api/alps/fill': async (body) => {

@@ -604,6 +604,17 @@ $('#alpsOpen').addEventListener('click', async () => {
   }
 });
 
+$('#alpsScan').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/alps/scan');
+    const lines = r.fields.map((f) => `[${f.구역 || '-'}] ${f.라벨 || '-'} → id:${f.id || '(없음)'}${f.값 ? ` = ${f.값}` : ''}`);
+    $('#alpsStatus').textContent = `화면에서 찾은 칸 ${r.fields.length}개 (아래)`;
+    alert('송장 화면의 입력칸:\n\n' + lines.join('\n'));
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
 $('#alpsCheck').addEventListener('click', async () => {
   const btn = $('#alpsCheck');
   btn.disabled = true;
@@ -613,6 +624,7 @@ $('#alpsCheck').addEventListener('click', async () => {
     const parts = [s.message];
     if (s.shipper) parts.push(`송하인: ${s.shipper}`);
     else if (s.form) parts.push('⚠ 송하인 칸을 확인하지 못했습니다');
+    if (s.missing && s.missing.length) parts.push(`못 찾은 칸: ${s.missing.join(', ')}`);
     $('#alpsStatus').textContent = parts.join(' · ');
     toast(s.form ? '송장 화면에 연결됐습니다.' : s.message, !s.form);
   } catch (err) {
