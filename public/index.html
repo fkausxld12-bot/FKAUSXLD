@@ -15,10 +15,11 @@
 </header>
 
 <nav class="tabs no-print">
-  <button type="button" class="tab active" data-tab="home">주문 확인 <span class="badge hidden" id="badgeNew"></span></button>
+  <button type="button" class="tab active" data-tab="home">주문 <span class="badge hidden" id="badgeNew"></span></button>
+  <button type="button" class="tab" data-tab="band">농라 <span class="badge hidden" id="badgeBand"></span></button>
   <button type="button" class="tab" data-tab="sale">현장 판매</button>
   <button type="button" class="tab" data-tab="stock">재고</button>
-  <button type="button" class="tab" data-tab="invoice">송장 출력 <span class="badge hidden" id="badgeReady"></span></button>
+  <button type="button" class="tab" data-tab="invoice">송장 <span class="badge hidden" id="badgeReady"></span></button>
 </nav>
 
 <main class="no-print">
@@ -38,6 +39,7 @@
         <div class="row-gap">
           <select id="orderFilter">
             <option value="active">진행 중</option>
+            <option value="unprinted">송장 안 뽑은 주문</option>
             <option value="all">전체</option>
             <option value="nongra">농라만</option>
             <option value="store">스토어만</option>
@@ -74,8 +76,41 @@
       <p class="empty hidden" id="emptyOrders">표시할 주문이 없습니다.</p>
     </div>
 
-    <p class="note">※ 농라·스마트스토어 주문 자동 확인은 네이버 API 키가 있어야 연동됩니다.
-       지금은 주문 내용을 붙여넣어 등록하면 채널별로 정리해 줍니다.</p>
+    <p class="note">※ 각 주문에 <b>송장</b> 표시가 있으면 이미 출력한 주문입니다.
+       농라 주문은 <b>농라</b> 탭에서 댓글을 바로 가져올 수 있습니다.</p>
+  </section>
+
+  <!-- ========================== 농라(밴드) 가져오기 ========================== -->
+  <section class="view hidden" id="view-band">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>농라 연동 설정</h2>
+        <button type="button" class="ghost" id="toggleBandSetup">설정 열기</button>
+      </div>
+      <div class="adder hidden" id="bandSetup">
+        <p class="hint">
+          ① <b>band.us</b>에 로그인한 브라우저에서 <b>developers.band.us</b> 접속 →
+          상단 <b>개발자 등록</b> → <b>Access Token 발급</b>에서 토큰을 복사해 아래에 붙여넣으세요.<br />
+          ② 저장 후 <b>밴드 불러오기</b>를 눌러 주문 받는 밴드를 선택하면 끝!
+        </p>
+        <input id="bandToken" placeholder="밴드 Access Token 붙여넣기" autocomplete="off" />
+        <div class="adder-actions">
+          <button type="button" class="primary" id="saveBandToken">토큰 저장</button>
+          <button type="button" class="ghost" id="loadBands">밴드 불러오기</button>
+          <select id="bandSelect" class="hidden"></select>
+        </div>
+        <p class="hint" id="bandStatus"></p>
+      </div>
+
+      <div class="panel-head">
+        <h2 id="bandInboxTitle">밴드 새 글·댓글</h2>
+        <button type="button" class="primary" id="bandRefresh">↻ 새로 가져오기</button>
+      </div>
+      <div id="bandInbox"></div>
+      <p class="empty" id="emptyBand">아직 가져온 내용이 없습니다. 연동 설정 후 <b>새로 가져오기</b>를 눌러 주세요.</p>
+    </div>
+    <p class="note">※ 댓글의 <b>주문 등록</b>을 누르면 내용이 주문 폼에 채워집니다. 주소·연락처만 확인하고 등록하세요.
+       스마트스토어 자동 연동은 커머스 API 승인 후 추가할 수 있습니다.</p>
   </section>
 
   <!-- ========================== 현장 판매 계산기 ========================== -->
@@ -157,7 +192,8 @@
         <label class="check"><input type="checkbox" id="markShipped" checked /> 출력 후 발송 완료로 바꾸기</label>
       </div>
     </div>
-    <p class="note">※ 출력 화면에서 브라우저 인쇄(Ctrl+P)가 열립니다. A4 한 장에 송장 6칸씩 나옵니다.</p>
+    <p class="note">※ 출력하면 주문에 <b>송장 출력됨</b> 표시가 남아 어떤 주문을 뽑았는지 확인할 수 있습니다.
+       안 뽑은 주문만 기본으로 체크됩니다. A4 한 장에 송장 6칸씩 나옵니다.</p>
   </section>
 </main>
 

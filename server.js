@@ -37,9 +37,11 @@ const STATUSES = ['new', 'paid', 'ready', 'shipped', 'canceled'];
 
 const emptyDb = () => ({
   products: [], // { id, name, price, stock }
-  orders: [], // { id, no, channel, buyer, phone, address, memo, items, status, createdAt, shippedAt }
+  orders: [], // { id, no, channel, buyer, phone, address, memo, items, status, createdAt, shippedAt, printedAt }
   history: [], // 재고 변동/판매 기록
   orderSeq: 0,
+  // 농라(밴드) 연동 설정: developers.band.us 에서 발급받은 액세스 토큰
+  band: { accessToken: '', bandKey: '', bandName: '', processed: {} },
   updatedAt: new Date().toISOString(),
 });
 
@@ -54,6 +56,7 @@ function loadDb() {
       orders: Array.isArray(raw.orders) ? raw.orders : [],
       history: Array.isArray(raw.history) ? raw.history : [],
       orderSeq: Number(raw.orderSeq) || 0,
+      band: { ...base.band, ...(raw.band || {}) },
     };
   } catch {
     return emptyDb();
@@ -161,11 +164,15 @@ function normalizeOrderItems(rawItems) {
   for (const it of rawItems || []) {
     const name = String(it.name || '').trim();
     if (!name) continue;
+    const product = it.productId ? findProduct(it.productId) : findProductByName(name);
+    const qty = intAtLeast(it.qty, 1, 1);
+    let price = Math.max(0, num(it.price, 0)); // 해당 품목의 총액
+    if (!price && product) price = product.price * qty; // 금액이 없으면 재고 목록의 개당가로 계산
     items.push({
-      productId: it.productId || (findProductByName(name) || {}).id || null,
+      productId: product ? product.id : null,
       name,
-      qty: intAtLeast(it.qty, 1, 1),
-      price: Math.max(0, num(it.price, 0)), // 해당 품목의 총액
+      qty,
+      price,
     });
   }
   return items;
@@ -178,7 +185,13 @@ function orderTotal(order) {
 /* ---------------------------------------------------------------- 라우팅 */
 
 const routes = {
-  'GET /api/state': () => db,
+  'GET /api/state': () => ({
+    products: db.products,
+    orders: db.orders,
+    history: db.history,
+    band: bandPublic(), // 토큰 자체는 내보내지 않습니다.
+    updatedAt: db.updatedAt,
+  }),
 
   /* ---------- 재고(품목) ---------- */
 
@@ -291,8 +304,15 @@ const routes = {
       status: STATUSES.includes(body.status) ? body.status : 'new',
       createdAt: new Date().toISOString(),
       shippedAt: null,
+      printedAt: null,
     };
     db.orders.unshift(order);
+
+    // 농라 댓글에서 가져온 주문이면 해당 댓글을 처리됨으로 표시 (중복 방지)
+    if (body.commentKey) {
+      db.band.processed[String(body.commentKey)] = order.id;
+    }
+
     logHistory('order', `주문 #${order.no} 등록 (${channelName(channel)}) - 재고 차감`);
     return { order };
   },
@@ -312,6 +332,21 @@ const routes = {
     if (!order) throw httpError(404, '주문을 찾을 수 없습니다.');
     setStatus(order, body.status);
     return { order };
+  },
+
+  // 송장 출력 완료 표시 (여러 건 한 번에)
+  'POST /api/orders/printed': (body) => {
+    const ids = Array.isArray(body.ids) ? body.ids : [];
+    let printed = 0;
+    for (const id of ids) {
+      const order = findOrder(id);
+      if (order && order.status !== 'canceled') {
+        order.printedAt = new Date().toISOString();
+        printed += 1;
+      }
+    }
+    if (printed) logHistory('order', `송장 ${printed}건 출력`);
+    return { printed };
   },
 
   // 여러 주문을 한 번에 발송 완료 처리 (송장 출력 후)
@@ -340,6 +375,68 @@ const routes = {
     return { ok: true };
   },
 
+  /* ---------- 농라(밴드) 연동 ---------- */
+
+  'POST /api/band/settings': (body) => {
+    if (body.accessToken !== undefined) db.band.accessToken = String(body.accessToken).trim();
+    if (body.bandKey !== undefined) db.band.bandKey = String(body.bandKey).trim();
+    if (body.bandName !== undefined) db.band.bandName = String(body.bandName).trim();
+    return { band: bandPublic() };
+  },
+
+  // 토큰으로 가입된 밴드 목록 조회
+  'GET /api/band/bands': async () => {
+    const data = await bandGet('/v2.1/bands');
+    const bands = (data.bands || []).map((b) => ({ name: b.name, bandKey: b.band_key }));
+    return { bands };
+  },
+
+  // 선택한 밴드의 최근 글 + 댓글을 가져와 주문 후보로 보여줍니다.
+  'GET /api/band/inbox': async () => {
+    if (!db.band.bandKey) throw httpError(400, '연동할 밴드를 먼저 선택해 주세요.');
+    const data = await bandGet('/v2/band/posts', { band_key: db.band.bandKey, locale: 'ko_KR' });
+    const posts = (data.items || []).slice(0, 10);
+    const inbox = [];
+
+    for (const post of posts) {
+      const entry = {
+        postKey: post.post_key,
+        author: post.author ? post.author.name : '',
+        snippet: String(post.content || '').slice(0, 120),
+        createdAt: post.created_at || null,
+        commentCount: post.comment_count || 0,
+        comments: [],
+      };
+      if (post.comment_count > 0) {
+        try {
+          const cd = await bandGet('/v2/band/post/comments', {
+            band_key: db.band.bandKey,
+            post_key: post.post_key,
+          });
+          entry.comments = (cd.items || []).map((c) => ({
+            commentKey: String(c.comment_key),
+            author: c.author ? c.author.name : '',
+            content: String(c.content || ''),
+            createdAt: c.created_at || null,
+            processed: Boolean(db.band.processed[String(c.comment_key)]),
+          }));
+        } catch {
+          // 댓글 조회가 막힌 글은 글만 보여줍니다.
+        }
+      }
+      inbox.push(entry);
+    }
+    return { inbox, bandName: db.band.bandName };
+  },
+
+  // 댓글을 주문으로 만들지 않고 처리됨으로만 표시
+  'POST /api/band/skip': (body) => {
+    const key = String(body.commentKey || '').trim();
+    if (!key) throw httpError(400, '댓글 정보가 없습니다.');
+    db.band.processed[key] = db.band.processed[key] || 'skipped';
+    return { ok: true };
+  },
+
   /* ---------- 현장 판매 계산기 ---------- */
 
   'POST /api/field-sale': (body) => {
@@ -361,6 +458,7 @@ const routes = {
       status: 'shipped', // 현장 판매는 그 자리에서 끝
       createdAt: new Date().toISOString(),
       shippedAt: new Date().toISOString(),
+      printedAt: null,
     };
     db.orders.unshift(order);
 
@@ -380,7 +478,9 @@ const routes = {
   },
 
   'POST /api/reset-all': () => {
+    const band = { ...db.band, processed: {} }; // 연동 설정은 남겨둡니다.
     db = emptyDb();
+    db.band = band;
     return { ok: true };
   },
 };
@@ -405,6 +505,42 @@ function setStatus(order, status) {
 
 function channelName(channel) {
   return { nongra: '농라', store: '스토어', field: '현장' }[channel] || channel;
+}
+
+/* ---------------------------------------------------------------- 밴드 API */
+
+// 토큰은 화면에 다시 보내지 않고, 설정 여부만 알려줍니다.
+function bandPublic() {
+  return {
+    hasToken: Boolean(db.band.accessToken),
+    bandKey: db.band.bandKey,
+    bandName: db.band.bandName,
+  };
+}
+
+async function bandGet(apiPath, params) {
+  if (!db.band.accessToken) {
+    throw httpError(400, '농라(밴드) 액세스 토큰을 먼저 저장해 주세요. (연동 설정 참고)');
+  }
+  const url = new URL('https://openapi.band.us' + apiPath);
+  url.searchParams.set('access_token', db.band.accessToken);
+  for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, v);
+
+  let res;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  } catch {
+    throw httpError(502, '밴드 서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (data.result_code !== 1) {
+    const detail = (data.result_data && data.result_data.message) || `코드 ${data.result_code ?? res.status}`;
+    if (String(detail).includes('Invalid') || res.status === 401) {
+      throw httpError(401, '밴드 토큰이 올바르지 않거나 만료되었습니다. 연동 설정에서 다시 발급받아 주세요.');
+    }
+    throw httpError(502, `밴드 응답 오류: ${detail}`);
+  }
+  return data.result_data || {};
 }
 
 /* ---------------------------------------------------------------- 서버 */
@@ -488,7 +624,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const body = MUTATING.test(req.method) ? await readBody(req) : {};
-    const result = route.handler(body, route.params) || {};
+    const result = (await route.handler(body, route.params)) || {};
     if (MUTATING.test(req.method)) save();
     sendJson(res, 200, { ...result, updatedAt: db.updatedAt });
   } catch (err) {
