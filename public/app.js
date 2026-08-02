@@ -10,7 +10,7 @@ let state = { orders: [], nongra: {}, store: {} };
 let toastTimer = null;
 let prevNewCount = null; // 새 주문 알림용
 
-const CHANNEL_NAME = { nongra: '농라', store: '스토어', field: '현장' };
+const CHANNEL_NAME = { nongra: '농라', store: '스토어', field: '현장', sms: '문자' };
 const STATUS_NAME = { new: '신규', paid: '입금확인', ready: '준비중', shipped: '완료', canceled: '취소' };
 const fmt = (n) => Number(n || 0).toLocaleString('ko-KR');
 const won = (n) => fmt(n) + '원';
@@ -563,6 +563,19 @@ $('#runDiag').addEventListener('click', async () => {
     } else {
       text += '\n(주문배송 페이지를 아직 찾지 못했습니다)\n';
     }
+    if (d.productAdmin) {
+      text += '\n===== 판매상품 관리 페이지 분석 (재고 자동수정 준비) =====\n';
+      if (d.productAdmin.error) {
+        text += `오류: ${d.productAdmin.error}\n`;
+      } else {
+        text += `주소: ${d.productAdmin.url}\n크기: ${fmt(d.productAdmin.bytes)}바이트 · 전송 주소: ${d.productAdmin.action}\n`;
+        text += `입력 항목: ${(d.productAdmin.fields || []).join(', ') || '없음'}\n`;
+        text += `"재고" 주변 화면 글자:\n${d.productAdmin.textAroundStock}\n`;
+        if (d.productAdmin.rawAroundStock) text += `"재고" 주변 원본 코드:\n${d.productAdmin.rawAroundStock}\n`;
+      }
+    } else {
+      text += '\n(판매상품 관리 페이지를 아직 찾지 못했습니다 - 몇 분 뒤 다시 진단해 보세요)\n';
+    }
     if (d.editForm) {
       text += '\n===== 판매글 수정 폼 분석 (읽기만, 재고 자동수정 준비용) =====\n';
       if (d.editForm.error) {
@@ -653,17 +666,18 @@ $('#orderForm').addEventListener('submit', async (e) => {
   const result = await act(() => api('/api/orders', {
     method: 'POST',
     body: JSON.stringify({
-      channel: 'store',
+      channel: $('#ofChannel').value,
       buyer: $('#ofBuyer').value,
       phone: $('#ofPhone').value,
       address: $('#ofAddress').value,
       itemsText,
+      status: $('#ofChannel').value === 'sms' ? 'paid' : 'new',
     }),
   }));
   if (result) {
     ['#ofBuyer', '#ofPhone', '#ofAddress', '#ofItems'].forEach((s) => { $(s).value = ''; });
     $('#orderForm').classList.add('hidden');
-    toast(`스토어 주문 #${result.order.no} 등록 완료`);
+    toast(`주문 #${result.order.no} 등록 완료! 수량·매출에 반영됐습니다.`);
   }
 });
 
