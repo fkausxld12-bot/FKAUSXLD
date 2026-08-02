@@ -101,7 +101,10 @@
   <section class="panel">
     <div class="panel-head">
       <h2>현장 판매 (배송비 없음)</h2>
-      <button type="button" class="ghost" id="clearSale">비우기</button>
+      <div class="row-gap">
+        <a id="openEdit" class="ghost hidden" style="text-decoration:none; padding:7px 11px; border:1px solid var(--line); border-radius:10px; font-size:13px; color:var(--muted);" target="_blank" rel="noopener">✏️ 농라F 재고 수정 열기</a>
+        <button type="button" class="ghost" id="clearSale">비우기</button>
+      </div>
     </div>
     <p class="hint pad-h" id="saleHint">농라F 판매 페이지의 상품·재고가 자동으로 여기에 동기화됩니다.
       +/− 로 수량을 넣으면 배송비 빼고 가격이 바로 나옵니다.</p>

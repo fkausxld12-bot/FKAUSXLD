@@ -227,6 +227,15 @@ function renderNongraStatus() {
   const n = state.nongra || {};
   const el = $('#nongraStatus');
   if (state.version) $('#connText').textContent = `연결됨 · ${state.version}`;
+
+  // 농라F 판매글 수정 바로가기
+  const editLink = $('#openEdit');
+  if (n.editUrl) {
+    editLink.href = n.editUrl;
+    editLink.classList.remove('hidden');
+  } else {
+    editLink.classList.add('hidden');
+  }
   if (!n.configured) {
     el.textContent = '아직 연동 전입니다. [설정]을 눌러 농라F 주문서 게시판 주소를 저장해 주세요.';
     return;
@@ -482,7 +491,7 @@ $('#saleSubmit').addEventListener('click', async () => {
   if (result) {
     saleCart = [];
     renderSaleGrid();
-    toast(`현장 판매 ${won(total)} 등록! 실수했으면 주문 목록에서 취소할 수 있습니다.`);
+    toast(`현장 판매 ${won(total)} 등록! 농라F 재고도 [✏️ 수정 열기]에서 줄여 주세요.`);
   }
 });
 
@@ -532,6 +541,16 @@ $('#runDiag').addEventListener('click', async () => {
       }
     } else {
       text += '\n(주문배송 페이지를 아직 찾지 못했습니다)\n';
+    }
+    if (d.editForm) {
+      text += '\n===== 판매글 수정 폼 분석 (읽기만, 재고 자동수정 준비용) =====\n';
+      if (d.editForm.error) {
+        text += `오류: ${d.editForm.error}\n`;
+      } else {
+        text += `주소: ${d.editForm.url}\n응답: ${d.editForm.status} (${fmt(d.editForm.bytes)}바이트)\n`;
+        text += `전송 주소(action): ${d.editForm.action}\n`;
+        text += `입력 항목들: ${(d.editForm.fields || []).join(', ') || '없음'}\n`;
+      }
     }
     for (const p of d.posts) {
       text += `\n───── 글 #${p.wrId} ─────\n`;

@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v19'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v20'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -306,6 +306,10 @@ const routes = {
       loggedIn: nongraCache.loggedIn,
       sales: nongraCache.sales, // 판매 페이지 상품·재고·판매 현황
       orderedTotal: nongraCache.sales.products.reduce((s, p) => s + p.sold + p.progress, 0),
+      // 판매글 수정 페이지 바로가기 (현장판매 후 재고를 손으로 줄일 때)
+      editUrl: db.nongra.wrId && db.nongra.base && !db.nongra.short
+        ? `${db.nongra.base}/bbs/write.php?bo_table=${encodeURIComponent(db.nongra.boTable)}&w=u&wr_id=${db.nongra.wrId}`
+        : '',
     },
     store: storePublic(),
     salesDays: db.salesDays.slice(-5),
@@ -623,6 +627,35 @@ const routes = {
         posts.push({ wrId, error: err.message });
       }
     }
+    // 판매글 수정 폼 분석 (읽기만 합니다 - 아무것도 바꾸지 않음)
+    // → 현장판매 시 재고를 자동으로 줄이는 기능을 만들기 위한 구조 확인용
+    let editForm = null;
+    if (n.wrId) {
+      try {
+        const editUrl = `${n.base}/bbs/write.php?bo_table=${encodeURIComponent(n.boTable)}&w=u&wr_id=${n.wrId}`;
+        const res = await nongraFetch(editUrl);
+        const html = await res.text();
+        const formM = html.match(/<form[^>]*action=["']([^"']+)["'][^>]*>/i);
+        const fields = [];
+        const fre = /<(input|select|textarea)\b[^>]*name=["']([^"']+)["'][^>]*>/gi;
+        let fm;
+        while ((fm = fre.exec(html)) && fields.length < 60) {
+          const tag = fm[0];
+          const valueM = tag.match(/value=["']([^"']{0,40})/);
+          fields.push(`${fm[2]}${valueM && valueM[1] ? `=${valueM[1]}` : ''}`);
+        }
+        editForm = {
+          url: editUrl,
+          status: res.status,
+          bytes: html.length,
+          action: formM ? formM[1] : '(폼을 찾지 못함)',
+          fields,
+        };
+      } catch (err) {
+        editForm = { error: err.message };
+      }
+    }
+
     // 주문배송 페이지가 발견됐으면 그 페이지도 진단합니다.
     let orderPage = null;
     if (db.nongra.orderPageUrl) {
@@ -654,6 +687,7 @@ const routes = {
       listSize: listHtml.length,
       foundPostIds: wrIds,
       orderPage,
+      editForm,
       posts,
     };
   },
