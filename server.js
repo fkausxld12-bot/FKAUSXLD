@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v15'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v16'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -449,6 +449,8 @@ const routes = {
       nongraCache.loggedIn = false;
     }
     // 설정이 바뀌면 바로 한 번 가져와서 화면에 보여줍니다.
+    // 짧은 주소면 실제 사이트 경로부터 알아냅니다. (로그인·목록 주소 보정)
+    if (db.nongra.short) await discoverGnuPath();
     if (db.nongra.base && db.nongra.boTable) await pollNongra(true);
     if (nongraCache.error) throw httpError(502, `저장은 했지만 가져오기 실패: ${nongraCache.error}`);
     return { nongra: nongraPublic() };
@@ -837,6 +839,32 @@ async function nongraFetchPage(url) {
   return { res, html, frames: frameSrcs.length };
 }
 
+/**
+ * 짧은 주소(farmer4989.com/게시판/글)를 붙여넣은 경우, 글 페이지 안의 링크에서
+ * 실제 그누보드 경로(/gnuboard5 등)를 알아내 로그인·목록 주소를 바로잡습니다.
+ */
+async function discoverGnuPath() {
+  const n = db.nongra;
+  if (!n.short || !n.base || !n.boTable) return false;
+  try {
+    const url = `${n.base}/${n.boTable}${n.wrId ? `/${n.wrId}` : ''}`;
+    const res = await nongraFetch(url);
+    const html = await res.text();
+    const m = html.match(/["'](\/[^"'<>]{0,60}?)\/bbs\/(?:login_check|board|write)\.php/)
+      || html.match(/["'](\/[^"'<>]{0,60}?)\/skin\/board\//);
+    if (!m) return false;
+    n.base = new URL(n.base).origin + m[1];
+    n.short = false;
+    nongraCache.cookies = {};
+    nongraCache.loggedIn = false;
+    logHistory('order', `농라F 실제 경로 자동 감지: ${m[1]}`);
+    save();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 그누보드 로그인 (비밀댓글 확인용)
 async function nongraLogin() {
   const n = db.nongra;
@@ -1197,9 +1225,48 @@ function parseNongraProducts(html) {
     const name = texts.length ? texts[texts.length - 1] : '';
     if (!name) continue;
     if (products.some((p) => p.name === name)) continue;
-    products.push({ name, price, stock, progress: 0, sold: 0, approx: true });
+
+    // 이 상품의 실시간 조회에 쓰이는 번호: quantity(-1, 1988817, 8000)의 1988817
+    const after = html.slice(m.index, m.index + 500);
+    const idm = after.match(/quantity\(-?1,\s*(\d+)/);
+
+    products.push({
+      name,
+      price,
+      stock,
+      progress: 0,
+      sold: 0,
+      approx: true, // 실시간 조회 전까지는 대략치
+      optionId: idm ? idm[1] : '',
+    });
   }
   return products;
+}
+
+/**
+ * 사이트가 화면에 [재고/진행/판매]를 그릴 때 쓰는 실시간 조회 주소를
+ * 그대로 호출해 정확한 숫자로 바꿉니다. 응답 형식: "판매_재고_진행"
+ */
+async function enrichLiveCounts(widget, wrId) {
+  const n = db.nongra;
+  const cntUrl = `${n.base}/skin/board/basic/view_gonggoo.cnt.php`;
+  for (const p of widget) {
+    if (!p.optionId) continue;
+    try {
+      const res = await nongraFetch(
+        `${cntUrl}?total=1&idx=${p.optionId}&wr_id=${wrId}&bo_table=${encodeURIComponent(n.boTable)}`,
+      );
+      const parts = (await res.text()).trim().split('_').map((x) => parseInt(x, 10));
+      if (parts.length >= 3 && parts.every((v) => Number.isFinite(v))) {
+        p.sold = parts[0]; // 사용(판매)
+        p.stock = parts[1]; // 재고
+        p.progress = parts[2]; // 진행중
+        p.approx = false;
+      }
+    } catch {
+      /* 실패하면 주석 속 재고 값 유지 */
+    }
+  }
 }
 
 async function pollNongra(force = false) {
@@ -1207,11 +1274,18 @@ async function pollNongra(force = false) {
   if (!n.base || !n.boTable || nongraCache.polling) return;
   nongraCache.polling = true;
   try {
+    // 짧은 주소 상태로 남아 있으면 실제 경로부터 알아냅니다.
+    if (n.short) await discoverGnuPath();
+
     // 로그인 정보가 있고 아직 세션이 없으면 로그인부터
     if (n.mbId && !nongraCache.loggedIn) await nongraLogin().catch(() => {});
 
     // 게시판 목록에서 최신 주문서 글 번호들을 가져옵니다.
-    const listRes = await nongraFetch(nongraListUrl());
+    let listRes = await nongraFetch(nongraListUrl());
+    if (listRes.status === 404 && n.short && await discoverGnuPath()) {
+      if (n.mbId) await nongraLogin().catch(() => {});
+      listRes = await nongraFetch(nongraListUrl()); // 경로 보정 후 재시도
+    }
     const listHtml = await listRes.text();
     const wrIds = parseWrIds(listHtml, n.boTable);
     // 설정할 때 붙여넣은 판매 페이지는 목록에 없어도 항상 맨 먼저 확인합니다.
@@ -1236,7 +1310,10 @@ async function pollNongra(force = false) {
         if (widget.length < 2) {
           // farmer4989처럼 재고가 주석 속에 있는 구조
           const staticWidget = parseNongraProducts(html);
-          if (staticWidget.length >= 2) widget = staticWidget;
+          if (staticWidget.length >= 2) {
+            widget = staticWidget;
+            await enrichLiveCounts(widget, wrId); // 실시간 재고/진행/판매로 갱신
+          }
         }
         if (widget.length >= 2) applySalesWidget(wrId, widget);
 
