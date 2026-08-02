@@ -15,8 +15,9 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const alps = require('./alps');
 
-const APP_VERSION = 'v25'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v26'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -73,6 +74,8 @@ const emptyDb = () => ({
   },
   // 판매일(장) 경계: 새 발송글 기준으로 매출 날짜를 나눕니다.
   salesDays: [], // [{ id, at, label: 'YYYY-MM-DD' }]
+  // 송장(ALPS) 등록 기록: 주문 id → { at, orderNo } (이중 발행 방지)
+  invoices: {},
   // 문자 주문 안내 문구 설정
   smsInfo: { account: '농협 351-1168-0445-63 명정원예영농조합법인' }, // 입금 계좌 문구
   // 스마트스토어(네이버 커머스 API) 연동 설정
@@ -98,6 +101,7 @@ function loadDb() {
       orderSeq: Number(raw.orderSeq) || 0,
       salesDays: Array.isArray(raw.salesDays) ? raw.salesDays : [],
       smsInfo: { account: (raw.smsInfo && raw.smsInfo.account) || base.smsInfo.account },
+      invoices: raw.invoices && typeof raw.invoices === 'object' ? raw.invoices : {},
       nongra: {
         ...base.nongra,
         ...(raw.nongra || {}),
@@ -232,6 +236,11 @@ function orderTotal(order) {
 
 /* ------------------------------------------------- 판매일(장) 기준 매출 */
 
+function timeLabel(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('ko-KR');
+}
+
 function dateLabel(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
@@ -341,6 +350,7 @@ const routes = {
     },
     store: storePublic(),
     smsAccount: db.smsInfo.account,
+    invoices: db.invoices,
     salesDays: db.salesDays.slice(-5),
     currentLabel: currentSalesLabel(),
     salesSummary: salesSummary(),
@@ -869,6 +879,46 @@ const routes = {
     lines.push('입금 확인 후 당일 발송해 드립니다. 감사합니다!');
 
     return { order, goodsTotal, shippingFee, payTotal, message: lines.join('\n') };
+  },
+
+  /* ---------- 송장 도우미 (롯데 ALPS) ---------- */
+
+  'POST /api/alps/open': async () => {
+    const r = await alps.launch();
+    return { ...r, loginUrl: alps.ALPS_LOGIN_URL };
+  },
+
+  'GET /api/alps/status': async () => alps.status(),
+
+  // 주문 하나를 송장 폼에 채웁니다. (저장은 하지 않습니다)
+  'POST /api/alps/fill': async (body) => {
+    const order = findOrder(String(body.orderId || ''));
+    if (!order) throw httpError(404, '주문을 찾을 수 없습니다.');
+    if (order.status === 'canceled') throw httpError(400, '취소된 주문입니다.');
+    if (db.invoices[order.id] && !body.force) {
+      throw httpError(400, `이미 송장을 등록한 주문입니다. (${timeLabel(db.invoices[order.id].at)}) 다시 하려면 확인을 눌러 주세요.`);
+    }
+    const r = await alps.fillOrder(order, { orderNo: order.no });
+    logHistory('order', `송장 폼 채움: 주문 #${order.no} (${order.buyer})`);
+    return { ...r, order: { id: order.id, no: order.no, buyer: order.buyer } };
+  },
+
+  // 채워 넣은 송장을 실제로 저장합니다. (명시적으로 지시할 때만)
+  'POST /api/alps/save': async (body) => {
+    const order = findOrder(String(body.orderId || ''));
+    if (!order) throw httpError(404, '주문을 찾을 수 없습니다.');
+    const r = await alps.saveForm();
+    if (r.verified) {
+      db.invoices[order.id] = { at: new Date().toISOString(), orderNo: order.no };
+      if (order.status !== 'shipped') {
+        order.status = 'shipped';
+        order.shippedAt = new Date().toISOString();
+      }
+      logHistory('order', `송장 저장 완료: 주문 #${order.no} (${order.buyer}) - 발송 완료 처리`);
+    } else {
+      logHistory('order', `송장 저장 시도: 주문 #${order.no} - 확인 필요`);
+    }
+    return r;
   },
 
   /* ---------- 현장 판매 계산기 ---------- */

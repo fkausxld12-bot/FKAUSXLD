@@ -6,7 +6,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-let state = { orders: [], nongra: {}, store: {} };
+let state = { orders: [], nongra: {}, store: {}, invoices: {} };
 let toastTimer = null;
 let prevNewCount = null; // 새 주문 알림용
 
@@ -349,6 +349,15 @@ function renderOrders() {
 
     const actions = document.createElement('div');
     actions.className = 'order-actions';
+
+    // 주소가 있는 주문은 송장 등록 버튼 (이미 등록했으면 "다시"로 표시)
+    const invoiced = (state.invoices || {})[order.id];
+    if (order.address && order.status !== 'canceled') {
+      const invBtn = toolBtn(invoiced ? '📦 송장 다시' : '📦 송장', () => registerInvoice(order, Boolean(invoiced)));
+      if (!invoiced) invBtn.className = 'primary';
+      actions.appendChild(invBtn);
+    }
+
     if (order.status !== 'shipped' && order.status !== 'canceled') {
       actions.appendChild(toolBtn('✓ 완료', () =>
         act(() => api(`/api/orders/${order.id}/status`, { method: 'POST', body: JSON.stringify({ status: 'shipped' }) }),
@@ -579,6 +588,73 @@ $('#copySmsMsg').addEventListener('click', async () => {
 });
 
 $('#closeSmsMsg').addEventListener('click', () => $('#smsMsgBox').classList.add('hidden'));
+
+/* ---------- 송장 도우미 (롯데 ALPS) ---------- */
+
+$('#alpsOpen').addEventListener('click', async () => {
+  const btn = $('#alpsOpen');
+  btn.disabled = true;
+  btn.textContent = '여는 중…';
+  const r = await act(() => api('/api/alps/open', { method: 'POST', body: '{}' }));
+  btn.disabled = false;
+  btn.textContent = '🖥 송장 창 열기';
+  if (r) {
+    $('#alpsStatus').textContent = `${r.message} 로그인 후 [건별주문접수] 화면을 열어 두세요.`;
+    toast('송장 창을 열었습니다. 그 창에서 로그인해 주세요.');
+  }
+});
+
+$('#alpsCheck').addEventListener('click', async () => {
+  const btn = $('#alpsCheck');
+  btn.disabled = true;
+  btn.textContent = '확인 중…';
+  try {
+    const s = await api('/api/alps/status');
+    const parts = [s.message];
+    if (s.shipper) parts.push(`송하인: ${s.shipper}`);
+    else if (s.form) parts.push('⚠ 송하인 칸을 확인하지 못했습니다');
+    $('#alpsStatus').textContent = parts.join(' · ');
+    toast(s.form ? '송장 화면에 연결됐습니다.' : s.message, !s.form);
+  } catch (err) {
+    $('#alpsStatus').textContent = err.message;
+    toast(err.message, true);
+  }
+  btn.disabled = false;
+  btn.textContent = '상태 확인';
+});
+
+// 주문 하나를 송장 폼에 채우고, 확인 후 저장까지
+async function registerInvoice(order, force) {
+  if (!order.address) return toast('주소가 없는 주문입니다.', true);
+
+  const fill = await act(() => api('/api/alps/fill', {
+    method: 'POST',
+    body: JSON.stringify({ orderId: order.id, force: Boolean(force) }),
+  }));
+  if (!fill) return undefined;
+
+  const lines = [
+    `#${order.no} ${order.buyer} 님 송장을 채웠습니다.`,
+    ...Object.entries(fill.filled || {}).map(([, v]) => `· ${v}`),
+  ];
+  if (fill.warnings && fill.warnings.length) {
+    lines.push('', '확인해 주세요:', ...fill.warnings.map((w) => `- ${w}`));
+  }
+  lines.push('', '브라우저 화면을 확인하셨나요? 저장할까요?');
+
+  if (!confirm(lines.join('\n'))) {
+    return toast('채우기만 했습니다. 화면에서 직접 저장하셔도 됩니다.');
+  }
+
+  const saved = await act(() => api('/api/alps/save', {
+    method: 'POST',
+    body: JSON.stringify({ orderId: order.id }),
+  }));
+  if (!saved) return undefined;
+  return toast(saved.verified
+    ? `송장 저장 완료! #${order.no} 발송 완료로 바꿨습니다.`
+    : '저장을 눌렀지만 확인이 안 됐습니다. 브라우저 화면에서 확인해 주세요.', !saved.verified);
+}
 
 /* ------------------------------------------------------------ 농라F 연동 */
 
