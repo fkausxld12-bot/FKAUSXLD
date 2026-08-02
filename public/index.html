@@ -19,8 +19,24 @@
   <section class="summary">
     <div class="card"><span class="label">농라 신규</span><strong id="cntNongra">0</strong><span class="unit">건</span></div>
     <div class="card"><span class="label">스토어 신규</span><strong id="cntStore">0</strong><span class="unit">건</span></div>
-    <div class="card"><span class="label">오늘 주문</span><strong id="cntToday">0</strong><span class="unit">건</span></div>
-    <div class="card money"><span class="label">오늘 금액</span><strong id="sumToday">0</strong><span class="unit">원</span></div>
+    <div class="card"><span class="label" id="labelCntToday">이번 장 주문</span><strong id="cntToday">0</strong><span class="unit">건</span></div>
+    <div class="card money"><span class="label" id="labelSumToday">이번 장 매출</span><strong id="sumToday">0</strong><span class="unit">원</span></div>
+  </section>
+
+  <!-- 날짜별 매출 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>날짜별 매출 (발송글 기준)</h2>
+      <div class="row-gap">
+        <button type="button" class="primary" id="newSalesDay">🆕 새 판매일 시작</button>
+        <button type="button" class="ghost" id="undoSalesDay">되돌리기</button>
+      </div>
+    </div>
+    <p class="hint pad-h">농라F에 새 판매글이 올라오면 자동으로 다음 날짜 매출로 넘어갑니다.
+      발송안내를 다른 곳(카페 등)에 올리셨다면 올린 직후 <b>새 판매일 시작</b>을 눌러 주세요.
+      매출은 배송비를 뺀 물품 금액입니다.</p>
+    <ul class="items" id="salesDayList"></ul>
+    <p class="empty hidden" id="emptySalesDay">주문이 들어오면 날짜별 매출이 자동으로 집계됩니다.</p>
   </section>
 
   <!-- 농라F 연동 -->

@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v17'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v18'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -65,10 +65,13 @@ const emptyDb = () => ({
     followLatest: true, // 항상 게시판의 최신 글을 추적
     short: false, // 짧은 주소(/게시판코드/글번호) 형식 사이트인지
     orderPageUrl: '', // 판매자용 주문배송 페이지 (자동 발견)
+    lastTopWrId: 0, // 마지막으로 본 최신 글 번호 (새 판매글 감지용)
     mbId: '', // 사이트 로그인 아이디 (비밀댓글 보기용, 선택)
     mbPw: '',
     processed: {}, // 처리한 댓글 key → 주문 id 또는 'skipped'
   },
+  // 판매일(장) 경계: 새 발송글 기준으로 매출 날짜를 나눕니다.
+  salesDays: [], // [{ id, at, label: 'YYYY-MM-DD' }]
   // 스마트스토어(네이버 커머스 API) 연동 설정
   store: {
     clientId: '', // 애플리케이션 ID
@@ -90,6 +93,7 @@ function loadDb() {
       orders: Array.isArray(raw.orders) ? raw.orders : [],
       history: Array.isArray(raw.history) ? raw.history : [],
       orderSeq: Number(raw.orderSeq) || 0,
+      salesDays: Array.isArray(raw.salesDays) ? raw.salesDays : [],
       nongra: {
         ...base.nongra,
         ...(raw.nongra || {}),
@@ -222,6 +226,56 @@ function orderTotal(order) {
   return order.items.reduce((s, it) => s + it.price, 0);
 }
 
+/* ------------------------------------------------- 판매일(장) 기준 매출 */
+
+function dateLabel(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// 새 판매일 경계를 추가합니다. (새 발송글을 올린 시각 기준)
+function addSalesDay(label, at, why) {
+  const clean = String(label || '').trim() || dateLabel(new Date(Date.now() + 24 * 60 * 60 * 1000));
+  db.salesDays.push({ id: nextId(), at: at || new Date().toISOString(), label: clean });
+  db.salesDays.sort((a, b) => new Date(a.at) - new Date(b.at));
+  if (db.salesDays.length > 60) db.salesDays.splice(0, db.salesDays.length - 60);
+  logHistory('sale', `새 판매일 시작: ${clean}${why ? ` (${why})` : ''}`);
+  save();
+}
+
+// 주문이 속하는 판매일: 주문 시각 이전의 마지막 경계 라벨, 없으면 달력 날짜
+function salesDayLabelOf(createdAt) {
+  const t = new Date(createdAt).getTime();
+  let label = null;
+  for (const b of db.salesDays) {
+    if (new Date(b.at).getTime() <= t) label = b.label;
+    else break;
+  }
+  return label || dateLabel(new Date(createdAt));
+}
+
+function currentSalesLabel() {
+  return db.salesDays.length
+    ? db.salesDays[db.salesDays.length - 1].label
+    : dateLabel(new Date());
+}
+
+// 판매일별 주문 건수·수량·매출(배송비 제외 물품 금액) 집계
+function salesSummary() {
+  const map = new Map();
+  for (const o of db.orders) {
+    if (o.status === 'canceled') continue;
+    const label = salesDayLabelOf(o.createdAt);
+    const row = map.get(label) || { label, count: 0, qty: 0, amount: 0 };
+    row.count += 1;
+    for (const it of o.items) {
+      row.amount += it.price;
+      if (!/배송|택배|퀵|포장/.test(it.name)) row.qty += it.qty;
+    }
+    map.set(label, row);
+  }
+  return [...map.values()].sort((a, b) => b.label.localeCompare(a.label)).slice(0, 14);
+}
+
 /* ---------------------------------------------------------------- 라우팅 */
 
 const routes = {
@@ -240,9 +294,26 @@ const routes = {
       orderedTotal: nongraCache.sales.products.reduce((s, p) => s + p.sold + p.progress, 0),
     },
     store: storePublic(),
+    salesDays: db.salesDays.slice(-5),
+    currentLabel: currentSalesLabel(),
+    salesSummary: salesSummary(),
     version: APP_VERSION,
     updatedAt: db.updatedAt,
   }),
+
+  // 새 판매일 시작 (새 발송글을 올린 직후)
+  'POST /api/salesday': (body) => {
+    addSalesDay(body.label, body.at, '직접 시작');
+    return { currentLabel: currentSalesLabel() };
+  },
+
+  // 실수로 눌렀을 때 마지막 판매일 경계 취소
+  'POST /api/salesday/undo': () => {
+    if (!db.salesDays.length) throw httpError(400, '되돌릴 판매일이 없습니다.');
+    const removed = db.salesDays.pop();
+    logHistory('sale', `판매일 취소: ${removed.label}`);
+    return { currentLabel: currentSalesLabel() };
+  },
 
   /* ---------- 재고(품목) ---------- */
 
@@ -1358,6 +1429,26 @@ async function pollNongra(force = false) {
     }
     const listHtml = await listRes.text();
     const wrIds = parseWrIds(listHtml, n.boTable);
+
+    // 게시판에 새 판매글이 올라오면 자동으로 새 판매일을 시작합니다.
+    const listMax = wrIds.length ? Math.max(...wrIds) : 0;
+    if (listMax && n.lastTopWrId && listMax > n.lastTopWrId) {
+      let label = ''; // 제목의 "08월 03일"에서 날짜를 읽고, 없으면 다음날로
+      try {
+        const { html: newPostHtml } = await nongraFetchPage(nongraPostUrl(listMax));
+        const tm = stripTags(newPostHtml).match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+        if (tm) {
+          label = `${new Date().getFullYear()}-${String(tm[1]).padStart(2, '0')}-${String(tm[2]).padStart(2, '0')}`;
+        }
+      } catch {
+        /* 제목을 못 읽으면 기본값(다음날) 사용 */
+      }
+      addSalesDay(label, new Date().toISOString(), `새 판매글 #${listMax} 감지`);
+    }
+    if (listMax) {
+      n.lastTopWrId = Math.max(n.lastTopWrId || 0, listMax);
+    }
+
     // 설정할 때 붙여넣은 판매 페이지는 목록에 없어도 항상 맨 먼저 확인합니다.
     if (n.wrId) {
       const idx = wrIds.indexOf(n.wrId);
