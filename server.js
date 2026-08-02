@@ -205,10 +205,10 @@ const routes = {
     nongra: {
       ...nongraPublic(), // 비밀번호는 내보내지 않습니다.
       unprocessed: nongraUnprocessedCount(),
+      secretCount: nongraCache.inbox.filter((p) => p.secret && !db.nongra.processed[postKeyOf(p)]).length,
       fetchedAt: nongraCache.fetchedAt,
       error: nongraCache.error,
       loggedIn: nongraCache.loggedIn,
-      postTitle: nongraCache.inbox.length ? nongraCache.inbox[0].title : '',
     },
     updatedAt: db.updatedAt,
   }),
@@ -748,6 +748,9 @@ async function pollNongra(force = false) {
     nongraCache.inbox = posts.filter((p) => p.items.length > 0 || p.secret);
     nongraCache.fetchedAt = new Date().toISOString();
     nongraCache.error = '';
+
+    // 새 주문서는 사람 손 없이 바로 주문으로 등록합니다.
+    autoImportOrders();
   } catch (err) {
     nongraCache.error = err.message || '농라 사이트 조회 실패';
   } finally {
@@ -759,6 +762,48 @@ setInterval(() => pollNongra(false), NONGRA_POLL_MS);
 setTimeout(() => pollNongra(true), 3000); // 서버 시작 3초 후 첫 확인
 
 const postKeyOf = (p) => `w${p.wrId}`;
+
+// 아직 등록 안 된 주문서를 자동으로 주문 목록에 넣습니다.
+function autoImportOrders() {
+  let created = 0;
+  for (const p of nongraCache.inbox) {
+    const key = postKeyOf(p);
+    if (p.secret || db.nongra.processed[key]) continue;
+
+    const items = normalizeOrderItems(
+      p.items.map((it) => ({ name: it.name, qty: it.qty, price: it.amount })),
+    );
+    if (!items.length) continue;
+
+    try {
+      adjustStock(items, +1); // 재고 목록을 쓰는 경우에만 차감됩니다.
+    } catch {
+      // 재고가 부족해도 주문 접수는 막지 않습니다.
+    }
+
+    db.orderSeq += 1;
+    const order = {
+      id: nextId(),
+      no: db.orderSeq,
+      channel: 'nongra',
+      buyer: p.buyer || p.author || '',
+      phone: p.phone || '',
+      address: p.address || '',
+      memo: `농라F 주문서 #${p.wrId}${p.title && p.title !== `글 ${p.wrId}` ? ` · ${p.title}` : ''}`,
+      items,
+      status: 'new',
+      createdAt: new Date().toISOString(),
+      shippedAt: null,
+      printedAt: null,
+    };
+    db.orders.unshift(order);
+    db.nongra.processed[key] = order.id;
+    logHistory('order', `농라F 주문서 #${p.wrId} 자동 등록 → 주문 #${order.no} (${order.buyer})`);
+    created += 1;
+  }
+  if (created) save(); // 자동 등록은 요청 밖에서 일어나므로 직접 저장합니다.
+  return created;
+}
 
 function nongraUnprocessedCount() {
   return nongraCache.inbox.filter((p) => !db.nongra.processed[postKeyOf(p)]).length;
