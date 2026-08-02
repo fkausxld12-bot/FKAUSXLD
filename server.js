@@ -17,7 +17,7 @@ const path = require('path');
 const os = require('os');
 const alps = require('./alps');
 
-const APP_VERSION = 'v27'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v28'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -67,6 +67,7 @@ const emptyDb = () => ({
     short: false, // 짧은 주소(/게시판코드/글번호) 형식 사이트인지
     orderPageUrl: '', // 판매자용 주문배송 페이지 (자동 발견)
     productAdminUrl: '', // 판매상품 관리 페이지 (자동 발견, 재고 자동수정용)
+    editUrlOverride: '', // 판매글 수정 페이지 주소 (사용자가 직접 알려준 경우)
     lastTopWrId: 0, // 마지막으로 본 최신 글 번호 (새 판매글 감지용)
     mbId: '', // 사이트 로그인 아이디 (비밀댓글 보기용, 선택)
     mbPw: '',
@@ -344,9 +345,9 @@ const routes = {
       sales: nongraCache.sales, // 판매 페이지 상품·재고·판매 현황
       orderedTotal: nongraCache.sales.products.reduce((s, p) => s + p.sold + p.progress, 0),
       // 판매글 수정 페이지 바로가기 (현장판매 후 재고를 손으로 줄일 때)
-      editUrl: db.nongra.wrId && db.nongra.base && !db.nongra.short
-        ? `${db.nongra.base}/bbs/write.php?bo_table=${encodeURIComponent(db.nongra.boTable)}&w=u&wr_id=${db.nongra.wrId}`
-        : '',
+      editUrl: db.nongra.editUrlOverride || (db.nongra.wrId && db.nongra.base && !db.nongra.short
+        ? `${db.nongra.base}/bbs/write.php?w=u&bo_table=${encodeURIComponent(db.nongra.boTable)}&wr_id=${db.nongra.wrId}&page=`
+        : ''),
     },
     store: storePublic(),
     smsAccount: db.smsInfo.account,
@@ -579,6 +580,9 @@ const routes = {
       nongraCache.loggedIn = false;
     }
     if (body.followLatest !== undefined) db.nongra.followLatest = Boolean(body.followLatest);
+    if (body.editUrl !== undefined) {
+      db.nongra.editUrlOverride = String(body.editUrl).trim();
+    }
     if (body.mbId !== undefined) {
       db.nongra.mbId = String(body.mbId).trim();
       db.nongra.mbPw = String(body.mbPw || '').trim();
@@ -680,7 +684,8 @@ const routes = {
     let editForm = null;
     if (n.wrId) {
       try {
-        const editUrl = `${n.base}/bbs/write.php?bo_table=${encodeURIComponent(n.boTable)}&w=u&wr_id=${n.wrId}`;
+        const editUrl = n.editUrlOverride
+          || `${n.base}/bbs/write.php?w=u&bo_table=${encodeURIComponent(n.boTable)}&wr_id=${n.wrId}&page=`;
         const res = await nongraFetch(editUrl);
         const html = await res.text();
         const formM = html.match(/<form[^>]*action=["']([^"']+)["'][^>]*>/i);
@@ -692,12 +697,29 @@ const routes = {
           const valueM = tag.match(/value=["']([^"']{0,40})/);
           fields.push(`${fm[2]}${valueM && valueM[1] ? `=${valueM[1]}` : ''}`);
         }
+        // 상품·재고가 어떤 모양으로 들어있는지 (재고 자동 차감을 만들기 위한 확인)
+        const productRows = [];
+        // ① 상품명이 들어간 입력칸과 그 주변
+        const nameRe = /name=["']([^"']*(?:gds|goods|prod|item|opt|option|cont)[^"']*)["'][^>]*value=["']([^"']{1,40})["']/gi;
+        let pm;
+        while ((pm = nameRe.exec(html)) && productRows.length < 12) {
+          productRows.push(`${pm[1]} = ${pm[2]}`);
+        }
+        // ② 우리가 아는 상품명이 코드 어디에 있는지 그 주변을 그대로
+        const known = nongraCache.sales.products[0];
+        let around = '';
+        if (known) {
+          const idx = html.indexOf(known.name);
+          if (idx >= 0) around = html.slice(Math.max(0, idx - 400), idx + 500).replace(/\s+/g, ' ');
+        }
         editForm = {
           url: editUrl,
           status: res.status,
           bytes: html.length,
           action: formM ? formM[1] : '(폼을 찾지 못함)',
           fields,
+          productRows,
+          productAround: around || '(상품명을 수정 페이지에서 찾지 못했습니다)',
         };
       } catch (err) {
         editForm = { error: err.message };
