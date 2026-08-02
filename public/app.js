@@ -120,6 +120,16 @@ function renderSalesDays() {
   const rows = state.salesSummary || [];
   $('#emptySalesDay').classList.toggle('hidden', rows.length > 0);
 
+  // 설정된 경계(시작 시각)들을 보여줍니다. 이상하면 되돌리기로 고칠 수 있게.
+  const bounds = state.salesDays || [];
+  const boundsEl = $('#salesDayBounds');
+  if (boundsEl) {
+    boundsEl.textContent = bounds.length
+      ? '판매일 시작 기록: ' + bounds.map((b) => `${labelText(b.label)}은 ${timeText(b.at)}부터`).join(' · ')
+      : '';
+    boundsEl.classList.toggle('hidden', !bounds.length);
+  }
+
   for (const r of rows) {
     const li = document.createElement('li');
     li.className = 'item';
@@ -136,11 +146,22 @@ function renderSalesDays() {
 $('#newSalesDay').addEventListener('click', () => {
   const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
   const def = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
-  const input = prompt('새 판매일 날짜 (예: 2026-08-03)\n지금부터 들어오는 주문이 이 날짜 매출로 잡힙니다.', def);
-  if (input === null) return;
+  const label = prompt('① 새 판매일 날짜 (예: 2026-08-03)\n이 날짜 매출로 잡힙니다.', def);
+  if (label === null) return;
+
+  const now = new Date();
+  const defTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const at = prompt(
+    '② 시작 시각 - 이 시각 이후 주문부터 위 날짜 매출이 됩니다.\n'
+    + '   지금부터면 그대로 확인만 누르세요.\n'
+    + '   지난 시각으로 고치려면: 18:00 (오늘) 또는 2026-08-02 18:00',
+    defTime,
+  );
+  if (at === null) return;
+
   act(
-    () => api('/api/salesday', { method: 'POST', body: JSON.stringify({ label: input.trim() }) }),
-    (r) => `${labelText(r.currentLabel)} 판매일 시작! 지금부터 이 날짜 매출로 잡힙니다.`,
+    () => api('/api/salesday', { method: 'POST', body: JSON.stringify({ label: label.trim(), at: at.trim() }) }),
+    (r) => `${labelText(r.currentLabel)} 판매일 시작! 지정한 시각 이후 주문이 이 날짜 매출로 잡힙니다.`,
   );
 });
 

@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const APP_VERSION = 'v20'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v21'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -232,6 +232,30 @@ function dateLabel(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * 판매일 시작 시각 입력을 해석합니다.
+ *   "18:00"            → 오늘 18:00
+ *   "2026-08-02 18:00" → 그 날짜 그 시각
+ *   비어 있으면        → 지금
+ */
+function parseAtInput(raw) {
+  const str = String(raw || '').trim();
+  if (!str) return new Date().toISOString();
+
+  let m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[T\s]+(\d{1,2}):(\d{2})$/);
+  if (m) {
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]));
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  m = str.match(/^(\d{1,2}):(\d{2})$/);
+  if (m) {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), Number(m[1]), Number(m[2]));
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  throw httpError(400, '시각은 "18:00" 또는 "2026-08-02 18:00" 형식으로 넣어 주세요.');
+}
+
 // 새 판매일 경계를 추가합니다. (새 발송글을 올린 시각 기준)
 function addSalesDay(label, at, why) {
   const clean = String(label || '').trim() || dateLabel(new Date(Date.now() + 24 * 60 * 60 * 1000));
@@ -319,9 +343,10 @@ const routes = {
     updatedAt: db.updatedAt,
   }),
 
-  // 새 판매일 시작 (새 발송글을 올린 직후)
+  // 새 판매일 시작 (새 발송글을 올린 직후) - 시작 시각을 직접 지정할 수 있습니다.
   'POST /api/salesday': (body) => {
-    addSalesDay(body.label, body.at, '직접 시작');
+    const at = parseAtInput(body.at);
+    addSalesDay(body.label, at, body.at ? `직접 시작 ${new Date(at).toLocaleString('ko-KR')}` : '직접 시작');
     return { currentLabel: currentSalesLabel() };
   },
 
