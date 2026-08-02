@@ -16,6 +16,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const APP_VERSION = 'v12'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -237,6 +239,7 @@ const routes = {
       orderedTotal: nongraCache.sales.products.reduce((s, p) => s + p.sold + p.progress, 0),
     },
     store: storePublic(),
+    version: APP_VERSION,
     updatedAt: db.updatedAt,
   }),
 
@@ -491,8 +494,7 @@ const routes = {
     const posts = [];
     for (const wrId of targets) {
       try {
-        const res = await nongraFetch(nongraPostUrl(wrId));
-        const html = await res.text();
+        const { res, html, frames } = await nongraFetchPage(nongraPostUrl(wrId));
         const widget = parseSalesWidget(html);
         const siteOrders = parseSiteOrders(html);
         const p = parseOrderPost(html, wrId);
@@ -503,6 +505,7 @@ const routes = {
           wrId,
           status: res.status,
           bytes: html.length,
+          frames,
           finalUrl: res.url || '',
           title: p.title,
           secret: p.secret,
@@ -729,6 +732,39 @@ async function nongraFetch(url, options = {}) {
   }
   nongraStoreCookies(res);
   return res;
+}
+
+/**
+ * 페이지를 가져오고, 내용이 iframe(페이지 속 별도 페이지) 안에 있는 스킨이면
+ * 같은 사이트의 iframe 내용까지 합쳐서 돌려줍니다.
+ */
+async function nongraFetchPage(url) {
+  const res = await nongraFetch(url);
+  let html = await res.text();
+
+  const frameSrcs = [];
+  const re = /<i?frame[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html)) && frameSrcs.length < 3) {
+    const src = m[1];
+    if (/^(javascript:|about:|data:)/i.test(src)) continue;
+    try {
+      const abs = new URL(src, res.url || url);
+      const siteHost = new URL(db.nongra.base).host;
+      if (abs.host === siteHost) frameSrcs.push(abs.toString());
+    } catch {
+      /* 잘못된 주소는 무시 */
+    }
+  }
+  for (const src of frameSrcs) {
+    try {
+      const fres = await nongraFetch(src);
+      html += `\n<!-- iframe: ${src} -->\n${await fres.text()}`;
+    } catch {
+      /* iframe 하나 실패해도 계속 */
+    }
+  }
+  return { res, html, frames: frameSrcs.length };
 }
 
 // 그누보드 로그인 (비밀댓글 확인용)
@@ -1088,8 +1124,7 @@ async function pollNongra(force = false) {
     const posts = [];
     for (const wrId of wrIds.slice(0, 10)) {
       try {
-        const res = await nongraFetch(nongraPostUrl(wrId));
-        const html = await res.text();
+        const { html } = await nongraFetchPage(nongraPostUrl(wrId));
 
         // ① 상품 선택표가 있으면 = 판매 페이지 → 상품·재고·판매 수량 동기화
         //    (주문보다 먼저 읽어야 품목별 개당 가격을 매칭할 수 있습니다)
