@@ -633,58 +633,81 @@ function stripTags(html) {
     .trim();
 }
 
-// 게시판 목록 페이지에서 가장 최신 글 번호를 찾습니다.
-function parseLatestWrId(html, boTable) {
-  let latest = 0;
+// 게시판 목록 페이지에서 글 번호들을 최신순으로 찾습니다.
+function parseWrIds(html, boTable, limit = 15) {
+  const ids = new Set();
   const re = new RegExp(`bo_table=${boTable}(?:&(?:amp;)?[^"'\\s]*)?&(?:amp;)?wr_id=(\\d+)`, 'g');
   let m;
-  while ((m = re.exec(html))) latest = Math.max(latest, Number(m[1]));
-  return latest;
+  while ((m = re.exec(html))) ids.add(Number(m[1]));
+  return [...ids].sort((a, b) => b - a).slice(0, limit);
 }
 
-// 그누보드5 글 페이지에서 제목과 댓글 목록을 뽑아냅니다.
-function parsePost(html, wrId) {
+// 주문서 본문에서 "받는분: 홍길동" 같은 항목을 찾습니다.
+function pickField(lines, labels) {
+  for (const line of lines) {
+    const m = line.match(new RegExp(`^\\s*(?:${labels})\\s*[:：]?\\s*(.+)$`));
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return '';
+}
+
+// 그누보드5 글(주문서) 페이지에서 제목·작성자·품목 수량을 뽑아냅니다.
+function parseOrderPost(html, wrId) {
+  // 비밀글이면 비밀번호 입력 폼이 뜹니다.
+  if (/name="wr_password"|비밀글\s*기능으로|비밀글\s*입니다/.test(html) && !/id="bo_v_con"/.test(html)) {
+    return { wrId, secret: true, title: `비밀글 #${wrId}`, author: '', items: [], itemsText: '' };
+  }
+
   const titleMatch = html.match(/<span[^>]*class="[^"]*bo_v_tit[^"]*"[^>]*>([\s\S]*?)<\/span>/)
     || html.match(/<h1[^>]*id="bo_v_title"[^>]*>([\s\S]*?)<\/h1>/)
     || html.match(/<title>([\s\S]*?)<\/title>/);
   const title = titleMatch ? stripTags(titleMatch[1]) : `글 ${wrId}`;
 
-  const comments = [];
-  // 댓글 블록: <article id="c_12345" ...> ... (다음 댓글 전까지)
-  const blocks = html.split(/<article[^>]*id="c_(\d+)"/).slice(1);
-  for (let i = 0; i < blocks.length; i += 2) {
-    const commentId = blocks[i];
-    const block = blocks[i + 1] || '';
+  // 글 상단(댓글 이전) 영역에서 작성자를 찾습니다.
+  const beforeComments = html.split(/<section[^>]*id="bo_vc"/)[0];
+  const authorMatch = beforeComments.match(/class="[^"]*sv_member[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/)
+    || beforeComments.match(/class="[^"]*sv_guest[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/);
+  const author = authorMatch ? stripTags(authorMatch[1]) : '';
 
-    // 작성자: sv_member(회원) / sv_guest(손님) / member 클래스 순으로 찾습니다.
-    const authorMatch = block.match(/class="[^"]*sv_member[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/)
-      || block.match(/class="[^"]*sv_guest[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/)
-      || block.match(/class="[^"]*\bmember\b[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span)>/);
-    const author = authorMatch ? stripTags(authorMatch[1]) : '';
+  const timeMatch = beforeComments.match(/datetime="([^"]+)"/)
+    || beforeComments.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/)
+    || beforeComments.match(/(\d{2}-\d{2} \d{2}:\d{2})/);
 
-    const timeMatch = block.match(/datetime="([^"]+)"/)
-      || block.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/)
-      || block.match(/(\d{2}-\d{2} \d{2}:\d{2})/);
+  // 본문: id="bo_v_con" div가 표준, 없으면 본문 섹션 전체
+  const bodyMatch = html.match(/id="bo_v_con"[^>]*>([\s\S]*?)<\/div>\s*(?:<\/div>|<!--)/)
+    || html.match(/id="bo_v_con"[^>]*>([\s\S]*?)<\/div>/)
+    || html.match(/<section[^>]*id="bo_v_atc"[^>]*>([\s\S]*?)<\/section>/);
+  const bodyText = bodyMatch ? stripTags(bodyMatch[1]) : '';
+  const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
 
-    // 내용: id="comment-12345-content" div가 표준입니다.
-    const contentMatch = block.match(
-      new RegExp(`id="comment-${commentId}-content"[^>]*>([\\s\\S]*?)</div>`),
-    ) || block.match(/class="[^"]*cmt_contents[^"]*"[^>]*>([\s\S]*?)<\/div>/);
-    let content = contentMatch ? stripTags(contentMatch[1]) : '';
-
-    const secret = /비밀글|secret/i.test(block) && !content.replace(/비밀글\s*입니다\.?/g, '').trim();
-    if (secret) content = content || '🔒 비밀댓글입니다.';
-    if (!content) continue;
-
-    comments.push({
-      commentKey: `${wrId}c${commentId}`,
-      author,
-      content,
-      createdAt: timeMatch ? timeMatch[1] : null,
-      secret,
-    });
+  // 품목 줄: "유스커스(3개) 9,000원" 형식을 전부 수집
+  // 합계/받는분/연락처/주소 같은 안내 줄과 전화번호 줄은 품목이 아닙니다.
+  const NOT_ITEM = /^(합계|총|배송비|주문\s*목록|입금|받는\s*분|받는사람|성함|이름|주문자|연락처|전화|휴대폰|폰|주소|배송지|배송|요청|메모)/;
+  const PHONE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/;
+  const items = [];
+  const itemLines = [];
+  for (const line of lines) {
+    if (NOT_ITEM.test(line) || PHONE.test(line)) continue;
+    const parsed = parseLine(line);
+    if (parsed && /\d\s*개/.test(line)) {
+      items.push(parsed);
+      itemLines.push(line);
+    }
   }
-  return { title, comments };
+
+  return {
+    wrId,
+    secret: false,
+    title,
+    author,
+    createdAt: timeMatch ? timeMatch[1] : null,
+    buyer: pickField(lines, '받는\\s*분|받는사람|성함|이름|주문자|입금자') || author,
+    phone: pickField(lines, '연락처|전화번호|휴대폰|전화|폰')
+      || (bodyText.match(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/) || [''])[0],
+    address: pickField(lines, '주소|배송지|배송\\s*주소'),
+    items,
+    itemsText: itemLines.join('\n'),
+  };
 }
 
 async function pollNongra(force = false) {
@@ -695,34 +718,34 @@ async function pollNongra(force = false) {
     // 로그인 정보가 있고 아직 세션이 없으면 로그인부터
     if (n.mbId && !nongraCache.loggedIn) await nongraLogin().catch(() => {});
 
-    // 추적할 글 번호 결정: 항상 최신 글 or 고정 글
-    let wrId = n.wrId;
-    if (n.followLatest || !wrId) {
-      const listRes = await nongraFetch(`${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}`);
-      const listHtml = await listRes.text();
-      const latest = parseLatestWrId(listHtml, n.boTable);
-      if (latest) wrId = latest;
+    // 게시판 목록에서 최신 주문서 글 번호들을 가져옵니다.
+    const listRes = await nongraFetch(`${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}`);
+    const listHtml = await listRes.text();
+    const wrIds = parseWrIds(listHtml, n.boTable);
+    if (!wrIds.length) throw httpError(502, '게시판에서 글을 찾지 못했습니다. 주소를 확인해 주세요.');
+
+    // 새로 나타난 글(또는 강제 새로고침 시 최신 3개)만 내려받습니다.
+    const known = new Map(nongraCache.inbox.map((p) => [p.wrId, p]));
+    const posts = [];
+    for (const wrId of wrIds) {
+      const cached = known.get(wrId);
+      const needFetch = !cached || (force && posts.length < 3) || (cached.secret && nongraCache.loggedIn);
+      if (!needFetch) {
+        posts.push(cached);
+        continue;
+      }
+      try {
+        const res = await nongraFetch(
+          `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`,
+        );
+        posts.push(parseOrderPost(await res.text(), wrId));
+      } catch {
+        if (cached) posts.push(cached); // 일시 오류면 이전 내용 유지
+      }
     }
-    if (!wrId) throw httpError(502, '게시판에서 글을 찾지 못했습니다. 주소를 확인해 주세요.');
 
-    const postRes = await nongraFetch(
-      `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`,
-    );
-    const postHtml = await postRes.text();
-    const { title, comments } = parsePost(postHtml, wrId);
-
-    // 세션이 만료되어 비밀댓글이 다시 잠겼으면 한 번 재로그인 후 재시도
-    if (n.mbId && comments.some((c) => c.secret) && nongraCache.loggedIn === false && !force) {
-      await nongraLogin().catch(() => {});
-    }
-
-    nongraCache.inbox = [{
-      postKey: String(wrId),
-      title,
-      snippet: title,
-      commentCount: comments.length,
-      comments,
-    }];
+    // 주문서 후보만 남깁니다: 품목이 읽힌 글 + 아직 못 여는 비밀글
+    nongraCache.inbox = posts.filter((p) => p.items.length > 0 || p.secret);
     nongraCache.fetchedAt = new Date().toISOString();
     nongraCache.error = '';
   } catch (err) {
@@ -735,23 +758,17 @@ async function pollNongra(force = false) {
 setInterval(() => pollNongra(false), NONGRA_POLL_MS);
 setTimeout(() => pollNongra(true), 3000); // 서버 시작 3초 후 첫 확인
 
+const postKeyOf = (p) => `w${p.wrId}`;
+
 function nongraUnprocessedCount() {
-  let count = 0;
-  for (const post of nongraCache.inbox) {
-    for (const c of post.comments) {
-      if (!db.nongra.processed[c.commentKey]) count += 1;
-    }
-  }
-  return count;
+  return nongraCache.inbox.filter((p) => !db.nongra.processed[postKeyOf(p)]).length;
 }
 
 function nongraInboxWithFlags() {
-  return nongraCache.inbox.map((post) => ({
-    ...post,
-    comments: post.comments.map((c) => ({
-      ...c,
-      processed: Boolean(db.nongra.processed[c.commentKey]),
-    })),
+  return nongraCache.inbox.map((p) => ({
+    ...p,
+    postKey: postKeyOf(p),
+    processed: Boolean(db.nongra.processed[postKeyOf(p)]),
   }));
 }
 

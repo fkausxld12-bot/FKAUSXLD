@@ -552,11 +552,7 @@ $('#orderFilter').addEventListener('change', renderOrders);
 /* ---------- 농라(밴드) 연동 ---------- */
 
 function findInboxComment(commentKey) {
-  for (const post of bandInbox) {
-    const c = post.comments.find((x) => x.commentKey === commentKey);
-    if (c) return c;
-  }
-  return null;
+  return bandInbox.find((p) => p.postKey === commentKey) || null;
 }
 
 function renderBandStatus() {
@@ -570,15 +566,14 @@ function renderBandStatus() {
     status.textContent = `연동 중 · 3분마다 자동 확인 · ${when}${login}`
       + (b.error ? ` · ⚠ ${b.error}` : '');
   }
-  $('#bandInboxTitle').textContent = b.postTitle
-    ? `📌 ${b.postTitle} (자동 확인 중)` : '판매글 새 댓글';
+  $('#bandInboxTitle').textContent = b.configured ? '주문서 (자동 확인 중)' : '주문서';
 
   // 배지는 서버가 세어준 미처리 댓글 수를 그대로 씁니다. (3초마다 자동 갱신)
   setBadge('#badgeBand', b.unprocessed || 0);
 
   // 새 댓글이 늘어나면 소리와 함께 알려줍니다.
   if (prevUnprocessed !== null && (b.unprocessed || 0) > prevUnprocessed) {
-    toast(`🌸 농라에 새 댓글 ${b.unprocessed - prevUnprocessed}개! 농라 탭을 확인하세요.`);
+    toast(`🌸 농라에 새 주문서 ${b.unprocessed - prevUnprocessed}건! 농라 탭을 확인하세요.`);
     beep();
   }
   prevUnprocessed = b.unprocessed || 0;
@@ -625,65 +620,55 @@ function renderBandInbox() {
   $('#emptyBand').classList.toggle('hidden', bandInbox.length > 0);
 
   for (const post of bandInbox) {
-    const wrap = document.createElement('div');
-    wrap.className = 'band-post';
+    const row = document.createElement('div');
+    row.className = 'band-comment' + (post.processed ? ' done' : '');
 
-    const head = document.createElement('div');
-    head.className = 'band-post-head';
-    head.innerHTML = `<b>${escapeHtml(post.title || post.snippet || '판매글')}</b>
-      <span class="when">댓글 ${post.comments.length}개</span>`;
-    wrap.appendChild(head);
+    const text = document.createElement('div');
+    text.className = 'band-comment-text';
+    const summary = post.secret
+      ? '🔒 비밀글이라 내용을 볼 수 없습니다. 설정에서 농라 아이디로 로그인해 주세요.'
+      : post.items.map((it) => `${it.name} ${it.qty}개`).join(' · ');
+    const total = post.secret ? 0 : post.items.reduce((s, it) => s + it.amount, 0);
+    text.innerHTML = `<b>${escapeHtml(post.buyer || post.author || '주문서')}</b>
+      ${escapeHtml(post.title)}
+      <span class="band-snippet">${escapeHtml(summary)}${total ? ` · 합계 ${won(total)}` : ''}</span>
+      <span class="when">${post.createdAt || ''}${post.processed ? ' · 처리됨' : ''}</span>`;
+    row.appendChild(text);
 
-    if (!post.comments.length) {
-      const none = document.createElement('div');
-      none.className = 'band-comment';
-      none.innerHTML = '<div class="band-comment-text">아직 댓글이 없습니다.</div>';
-      wrap.appendChild(none);
+    if (!post.processed && !post.secret) {
+      const actions = document.createElement('div');
+      actions.className = 'row-gap';
+      const importBtn = document.createElement('button');
+      importBtn.type = 'button';
+      importBtn.className = 'primary';
+      importBtn.textContent = '주문 등록';
+      importBtn.addEventListener('click', () => importBandComment(post));
+      actions.append(importBtn, toolBtn('무시', () => skipBandComment(post)));
+      row.appendChild(actions);
     }
-
-    for (const c of post.comments) {
-      const row = document.createElement('div');
-      row.className = 'band-comment' + (c.processed ? ' done' : '');
-      const text = document.createElement('div');
-      text.className = 'band-comment-text';
-      text.innerHTML = `<b>${escapeHtml(c.author || '손님')}</b> ${escapeHtml(c.content)}
-        <span class="when">${c.createdAt || ''}${c.processed ? ' · 처리됨' : ''}</span>`;
-      row.appendChild(text);
-
-      if (!c.processed && !c.secret) {
-        const actions = document.createElement('div');
-        actions.className = 'row-gap';
-        const importBtn = document.createElement('button');
-        importBtn.type = 'button';
-        importBtn.className = 'primary';
-        importBtn.textContent = '주문 등록';
-        importBtn.addEventListener('click', () => importBandComment(c));
-        actions.append(importBtn, toolBtn('무시', () => skipBandComment(c)));
-        row.appendChild(actions);
-      }
-      wrap.appendChild(row);
-    }
-    box.appendChild(wrap);
+    box.appendChild(row);
   }
 }
 
-// 댓글 내용을 주문 폼에 채우고 주문 탭으로 이동합니다.
-function importBandComment(comment) {
-  pendingCommentKey = comment.commentKey;
+// 주문서 내용을 주문 폼에 채우고 주문 탭으로 이동합니다.
+function importBandComment(post) {
+  pendingCommentKey = post.postKey;
   $('#ofChannel').value = 'nongra';
-  $('#ofBuyer').value = comment.author || '';
-  $('#ofItems').value = comment.content || '';
-  $('#ofMemo').value = '농라 댓글에서 가져옴';
+  $('#ofBuyer').value = post.buyer || post.author || '';
+  $('#ofPhone').value = post.phone || '';
+  $('#ofAddress').value = post.address || '';
+  $('#ofItems').value = post.itemsText || '';
+  $('#ofMemo').value = `농라 주문서 #${post.wrId}`;
   $('#orderForm').classList.remove('hidden');
   $$('.tab').find((t) => t.dataset.tab === 'home').click();
   $('#ofPhone').focus();
-  toast('댓글 내용을 채웠습니다. 품목·연락처·주소를 확인하고 등록하세요.');
+  toast('주문서 내용을 채웠습니다. 확인하고 등록만 누르세요.');
 }
 
-function skipBandComment(comment) {
+function skipBandComment(post) {
   act(async () => {
-    await api('/api/nongra/skip', { method: 'POST', body: JSON.stringify({ commentKey: comment.commentKey }) });
-    comment.processed = true;
+    await api('/api/nongra/skip', { method: 'POST', body: JSON.stringify({ commentKey: post.postKey }) });
+    post.processed = true;
     renderBandInbox();
   });
 }
@@ -694,7 +679,7 @@ $('#saveNongra').addEventListener('click', async () => {
   const url = $('#nongraUrl').value.trim();
   const mbId = $('#nongraId').value.trim();
   if (!url && !mbId) return toast('판매글 주소를 붙여넣어 주세요.', true);
-  const body = { followLatest: $('#nongraFollow').checked };
+  const body = {};
   if (url) body.url = url;
   if (mbId) {
     body.mbId = mbId;
@@ -723,8 +708,8 @@ $('#bandRefresh').addEventListener('click', async () => {
   bandInbox = result.inbox || [];
   bandFetchedAt = result.fetchedAt || bandFetchedAt;
   renderBandInbox();
-  const comments = bandInbox.reduce((s, p) => s + p.comments.filter((c) => !c.processed).length, 0);
-  toast(comments ? `처리 안 된 댓글이 ${comments}개 있습니다.` : '새로 처리할 댓글이 없습니다.');
+  const pending = bandInbox.filter((p) => !p.processed).length;
+  toast(pending ? `처리 안 된 주문서가 ${pending}건 있습니다.` : '새로 처리할 주문서가 없습니다.');
 });
 
 /* ---------- 재고 등록 폼 ---------- */

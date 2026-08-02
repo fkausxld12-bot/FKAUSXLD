@@ -89,15 +89,14 @@
       </div>
       <div class="adder hidden" id="bandSetup">
         <p class="hint">
-          ① 농라(farmer4989.com)에서 <b>내 판매글</b>을 연 다음, 주소창의 주소를 그대로 복사해 붙여넣으세요.<br />
-          ② 새 판매글을 올려도 <b>자동으로 최신 글</b>을 따라갑니다.<br />
-          ③ 비밀댓글까지 보려면 농라 사이트 아이디/비밀번호도 저장하세요. (내 컴퓨터에만 저장됩니다)
+          ① 농라(farmer4989.com)에서 <b>주문서가 올라오는 게시판</b>(아무 주문서나 연 상태)의 주소를 그대로 복사해 붙여넣으세요.<br />
+          ② 이후 새 주문서가 올라오면 자동으로 품목·수량을 읽어옵니다.<br />
+          ③ 비밀글 주문서까지 읽으려면 농라 사이트 아이디/비밀번호도 저장하세요. (내 컴퓨터에만 저장됩니다)
         </p>
         <input id="nongraUrl" placeholder="예: https://farmer4989.com/gnuboard5/bbs/board.php?bo_table=ymh14141&wr_id=49" autocomplete="off" />
         <div class="form-grid" style="margin-top:8px">
           <label>농라 아이디 (선택) <input id="nongraId" autocomplete="off" /></label>
           <label>농라 비밀번호 (선택) <input id="nongraPw" type="password" autocomplete="off" /></label>
-          <label class="check" style="align-self:end"><input type="checkbox" id="nongraFollow" checked /> 항상 최신 글 따라가기</label>
         </div>
         <div class="adder-actions">
           <button type="button" class="primary" id="saveNongra">저장하고 연동 시작</button>
@@ -106,14 +105,14 @@
       </div>
 
       <div class="panel-head">
-        <h2 id="bandInboxTitle">밴드 새 글·댓글</h2>
+        <h2 id="bandInboxTitle">주문서</h2>
         <button type="button" class="primary" id="bandRefresh">↻ 지금 바로 확인</button>
       </div>
       <div id="bandInbox"></div>
-      <p class="empty" id="emptyBand">아직 가져온 내용이 없습니다. 연동을 마치면 자동으로 나타납니다.</p>
+      <p class="empty" id="emptyBand">아직 가져온 주문서가 없습니다. 연동을 마치면 자동으로 나타납니다.</p>
     </div>
-    <p class="note">※ 연동 후에는 <b>3분마다 자동으로</b> 판매글의 새 댓글을 확인하고, 새 댓글이 오면 알림음과 함께 알려줍니다.
-       댓글의 <b>주문 등록</b>을 누르면 내용이 주문 폼에 채워지고 등록하면 재고가 빠집니다.
+    <p class="note">※ 연동 후에는 <b>3분마다 자동으로</b> 게시판의 새 주문서를 확인하고, 새 주문서가 오면 알림음과 함께 알려줍니다.
+       주문서의 <b>주문 등록</b>을 누르면 품목·수량·주소가 주문 폼에 채워지고 등록하면 재고가 빠집니다.
        스마트스토어(sell.smartstore.naver.com)는 로그인 보안 때문에 네이버 커머스 API 승인 후 연동할 수 있습니다.</p>
   </section>
 
