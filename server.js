@@ -443,6 +443,47 @@ const routes = {
     };
   },
 
+  // 연동 진단: 서버가 게시판에서 무엇을 보고 있는지 그대로 보여줍니다.
+  'GET /api/nongra/diag': async () => {
+    const n = db.nongra;
+    if (!n.base || !n.boTable) throw httpError(400, '먼저 연동 설정을 저장해 주세요.');
+    if (n.mbId && !nongraCache.loggedIn) await nongraLogin().catch(() => {});
+
+    const listRes = await nongraFetch(`${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}`);
+    const listHtml = await listRes.text();
+    const wrIds = parseWrIds(listHtml, n.boTable);
+
+    const posts = [];
+    for (const wrId of wrIds.slice(0, 3)) {
+      try {
+        const res = await nongraFetch(
+          `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`,
+        );
+        const html = await res.text();
+        const p = parseOrderPost(html, wrId);
+        posts.push({
+          wrId,
+          title: p.title,
+          secret: p.secret,
+          itemsFound: p.items.length,
+          items: p.items.slice(0, 5),
+          buyer: p.buyer,
+          bodyFound: Boolean(p.debugBody),
+          bodyPreview: p.debugBody || '(본문을 찾지 못했습니다)',
+        });
+      } catch (err) {
+        posts.push({ wrId, error: err.message });
+      }
+    }
+    return {
+      loggedIn: nongraCache.loggedIn,
+      listStatus: listRes.status,
+      listSize: listHtml.length,
+      foundPostIds: wrIds,
+      posts,
+    };
+  },
+
   // 댓글을 주문으로 만들지 않고 처리됨으로만 표시
   'POST /api/nongra/skip': (body) => {
     const key = String(body.commentKey || '').trim();
@@ -621,6 +662,8 @@ async function nongraLogin() {
 function stripTags(html) {
   return String(html)
     .replace(/<br\s*\/?>/gi, '\n')
+    // 문단·표의 줄(행)이 끝나면 줄바꿈으로 취급해야 품목이 줄 단위로 읽힙니다.
+    .replace(/<\/(p|div|li|tr|h[1-6]|section|article|table|ul|ol)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
@@ -673,10 +716,11 @@ function parseOrderPost(html, wrId) {
     || beforeComments.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/)
     || beforeComments.match(/(\d{2}-\d{2} \d{2}:\d{2})/);
 
-  // 본문: id="bo_v_con" div가 표준, 없으면 본문 섹션 전체
-  const bodyMatch = html.match(/id="bo_v_con"[^>]*>([\s\S]*?)<\/div>\s*(?:<\/div>|<!--)/)
-    || html.match(/id="bo_v_con"[^>]*>([\s\S]*?)<\/div>/)
-    || html.match(/<section[^>]*id="bo_v_atc"[^>]*>([\s\S]*?)<\/section>/);
+  // 본문: 그누보드 스킨마다 조금씩 달라 여러 방법으로 찾습니다.
+  const bodyMatch = html.match(/<!--\s*본문 내용 시작[\s\S]*?-->([\s\S]*?)<!--\s*[}\s]*본문 내용 끝/)
+    || html.match(/id="bo_v_con"[^>]*>([\s\S]*?)(?:<!--|<\/section|<section|id="bo_v_sns"|id="bo_vc")/)
+    || html.match(/<section[^>]*id="bo_v_atc"[^>]*>([\s\S]*?)<\/section>/)
+    || html.match(/class="[^"]*view[-_]?content[^"]*"[^>]*>([\s\S]*?)<\/section/);
   const bodyText = bodyMatch ? stripTags(bodyMatch[1]) : '';
   const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
 
@@ -707,6 +751,7 @@ function parseOrderPost(html, wrId) {
     address: pickField(lines, '주소|배송지|배송\\s*주소'),
     items,
     itemsText: itemLines.join('\n'),
+    debugBody: bodyText.slice(0, 500), // 진단 화면용
   };
 }
 
@@ -724,22 +769,17 @@ async function pollNongra(force = false) {
     const wrIds = parseWrIds(listHtml, n.boTable);
     if (!wrIds.length) throw httpError(502, '게시판에서 글을 찾지 못했습니다. 주소를 확인해 주세요.');
 
-    // 새로 나타난 글(또는 강제 새로고침 시 최신 3개)만 내려받습니다.
+    // 최신 글들을 매번 다시 읽습니다. (주문서가 수정되어도 따라잡기 위해)
     const known = new Map(nongraCache.inbox.map((p) => [p.wrId, p]));
     const posts = [];
-    for (const wrId of wrIds) {
-      const cached = known.get(wrId);
-      const needFetch = !cached || (force && posts.length < 3) || (cached.secret && nongraCache.loggedIn);
-      if (!needFetch) {
-        posts.push(cached);
-        continue;
-      }
+    for (const wrId of wrIds.slice(0, 10)) {
       try {
         const res = await nongraFetch(
           `${n.base}/bbs/board.php?bo_table=${encodeURIComponent(n.boTable)}&wr_id=${wrId}`,
         );
         posts.push(parseOrderPost(await res.text(), wrId));
       } catch {
+        const cached = known.get(wrId);
         if (cached) posts.push(cached); // 일시 오류면 이전 내용 유지
       }
     }
@@ -749,8 +789,8 @@ async function pollNongra(force = false) {
     nongraCache.fetchedAt = new Date().toISOString();
     nongraCache.error = '';
 
-    // 새 주문서는 사람 손 없이 바로 주문으로 등록합니다.
-    autoImportOrders();
+    // 새 주문서는 자동 등록하고, 수정된 주문서는 주문에 반영합니다.
+    autoSyncOrders();
   } catch (err) {
     nongraCache.error = err.message || '농라 사이트 조회 실패';
   } finally {
@@ -763,46 +803,72 @@ setTimeout(() => pollNongra(true), 3000); // 서버 시작 3초 후 첫 확인
 
 const postKeyOf = (p) => `w${p.wrId}`;
 
-// 아직 등록 안 된 주문서를 자동으로 주문 목록에 넣습니다.
-function autoImportOrders() {
+// 새 주문서는 등록하고, 이미 등록된 주문서가 수정되었으면 주문에 반영합니다.
+function autoSyncOrders() {
   let created = 0;
+  let updated = 0;
+
   for (const p of nongraCache.inbox) {
     const key = postKeyOf(p);
-    if (p.secret || db.nongra.processed[key]) continue;
+    if (p.secret) continue;
 
     const items = normalizeOrderItems(
       p.items.map((it) => ({ name: it.name, qty: it.qty, price: it.amount })),
     );
     if (!items.length) continue;
 
-    try {
-      adjustStock(items, +1); // 재고 목록을 쓰는 경우에만 차감됩니다.
-    } catch {
-      // 재고가 부족해도 주문 접수는 막지 않습니다.
+    const existingId = db.nongra.processed[key];
+    if (!existingId) {
+      // 처음 보는 주문서 → 자동 등록
+      try {
+        adjustStock(items, +1); // 재고 목록을 쓰는 경우에만 차감됩니다.
+      } catch {
+        // 재고가 부족해도 주문 접수는 막지 않습니다.
+      }
+      db.orderSeq += 1;
+      const order = {
+        id: nextId(),
+        no: db.orderSeq,
+        channel: 'nongra',
+        buyer: p.buyer || p.author || '',
+        phone: p.phone || '',
+        address: p.address || '',
+        memo: `농라F 주문서 #${p.wrId}${p.title && p.title !== `글 ${p.wrId}` ? ` · ${p.title}` : ''}`,
+        items,
+        status: 'new',
+        createdAt: new Date().toISOString(),
+        shippedAt: null,
+        printedAt: null,
+      };
+      db.orders.unshift(order);
+      db.nongra.processed[key] = order.id;
+      logHistory('order', `농라F 주문서 #${p.wrId} 자동 등록 → 주문 #${order.no} (${order.buyer})`);
+      created += 1;
+      continue;
     }
 
-    db.orderSeq += 1;
-    const order = {
-      id: nextId(),
-      no: db.orderSeq,
-      channel: 'nongra',
-      buyer: p.buyer || p.author || '',
-      phone: p.phone || '',
-      address: p.address || '',
-      memo: `농라F 주문서 #${p.wrId}${p.title && p.title !== `글 ${p.wrId}` ? ` · ${p.title}` : ''}`,
-      items,
-      status: 'new',
-      createdAt: new Date().toISOString(),
-      shippedAt: null,
-      printedAt: null,
-    };
-    db.orders.unshift(order);
-    db.nongra.processed[key] = order.id;
-    logHistory('order', `농라F 주문서 #${p.wrId} 자동 등록 → 주문 #${order.no} (${order.buyer})`);
-    created += 1;
+    // 이미 등록된 주문서 → 내용이 바뀌었으면 동기화 (취소된 주문은 건드리지 않음)
+    const order = findOrder(existingId);
+    if (!order || order.status === 'canceled') continue;
+
+    const sigOf = (list) => JSON.stringify(list.map((i) => [i.name, i.qty, i.price]));
+    const buyer = p.buyer || p.author || order.buyer;
+    const changed = sigOf(order.items) !== sigOf(items)
+      || buyer !== order.buyer
+      || (p.phone && p.phone !== order.phone)
+      || (p.address && p.address !== order.address);
+    if (!changed) continue;
+
+    order.items = items;
+    order.buyer = buyer;
+    if (p.phone) order.phone = p.phone;
+    if (p.address) order.address = p.address;
+    logHistory('order', `농라F 주문서 #${p.wrId} 수정 감지 → 주문 #${order.no} 수량 동기화`);
+    updated += 1;
   }
-  if (created) save(); // 자동 등록은 요청 밖에서 일어나므로 직접 저장합니다.
-  return created;
+
+  if (created || updated) save(); // 폴링은 요청 밖에서 일어나므로 직접 저장합니다.
+  return { created, updated };
 }
 
 function nongraUnprocessedCount() {

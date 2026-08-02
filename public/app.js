@@ -108,6 +108,34 @@ function render() {
   renderNongraStatus();
   renderQty();
   renderOrders();
+  renderSaleGrid();
+}
+
+// 배송비·포장 같은 항목은 꽃 품목이 아니므로 집계·가격 학습에서 뺍니다.
+function isShippingItem(name) {
+  return /배송|택배|퀵|포장/.test(name);
+}
+
+// 주문서에 나온 품목들로부터 개당 가격을 자동으로 배웁니다. (최신 주문 우선)
+function learnedProducts() {
+  const map = new Map(); // name → { unit, count }
+  for (const o of state.orders) { // orders는 최신순
+    if (o.status === 'canceled') continue;
+    for (const it of o.items) {
+      if (isShippingItem(it.name)) continue;
+      const existing = map.get(it.name);
+      const unit = it.qty > 0 && it.price > 0 ? Math.round(it.price / it.qty) : 0;
+      if (existing) {
+        existing.count += it.qty;
+        if (!existing.unit && unit) existing.unit = unit;
+      } else {
+        map.set(it.name, { unit, count: it.qty });
+      }
+    }
+  }
+  return [...map.entries()]
+    .map(([name, v]) => ({ name, unit: v.unit, count: v.count }))
+    .sort((a, b) => b.count - a.count);
 }
 
 function renderSummary() {
@@ -146,12 +174,13 @@ function renderNongraStatus() {
   el.textContent = parts.join(' · ');
 }
 
-// 품목별 주문 수량 자동 집계 (취소 제외)
+// 품목별 주문 수량 자동 집계 (취소·배송비 제외)
 function renderQty() {
   const totals = new Map(); // name → { all, today }
   for (const o of state.orders) {
     if (o.status === 'canceled') continue;
     for (const it of o.items) {
+      if (isShippingItem(it.name)) continue;
       const t = totals.get(it.name) || { all: 0, today: 0 };
       t.all += it.qty;
       if (isToday(o.createdAt)) t.today += it.qty;
@@ -252,6 +281,115 @@ function toolBtn(label, onClick, danger) {
   return b;
 }
 
+/* ------------------------------------------------------------ 현장 판매 */
+
+let saleCart = []; // { name, qty, unit }
+
+function renderSaleGrid() {
+  const grid = $('#saleGrid');
+  grid.innerHTML = '';
+  for (const p of learnedProducts().slice(0, 16)) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'product-btn';
+    b.innerHTML = `
+      <span class="p-name">${escapeHtml(p.name)}</span>
+      <span class="p-price">${p.unit ? won(p.unit) : '가격 직접 입력'}</span>`;
+    b.addEventListener('click', () => addToSale(p.name, p.unit));
+    grid.appendChild(b);
+  }
+}
+
+function addToSale(name, unit) {
+  if (!unit) {
+    const input = prompt(`"${name}" 개당 가격(원)을 입력해 주세요.`, '');
+    if (input === null) return;
+    unit = Number(String(input).replace(/[^\d]/g, '')) || 0;
+    if (!unit) return toast('가격을 확인해 주세요.', true);
+  }
+  const line = saleCart.find((c) => c.name === name);
+  if (line) line.qty += 1;
+  else saleCart.push({ name, qty: 1, unit });
+  renderSaleCart();
+}
+
+function renderSaleCart() {
+  const list = $('#saleCart');
+  list.innerHTML = '';
+
+  for (const line of saleCart) {
+    const li = document.createElement('li');
+
+    const name = document.createElement('span');
+    name.className = 'c-name';
+    name.innerHTML = `${escapeHtml(line.name)}<span class="c-sub">개당 ${won(line.unit)}</span>`;
+
+    const minus = stepBtn('−', 'step', () => {
+      line.qty -= 1;
+      if (line.qty <= 0) saleCart = saleCart.filter((c) => c !== line);
+      renderSaleCart();
+    });
+    const qty = document.createElement('span');
+    qty.className = 'c-qty';
+    qty.textContent = line.qty;
+    const plus = stepBtn('＋', 'step plus', () => {
+      line.qty += 1;
+      renderSaleCart();
+    });
+
+    const price = document.createElement('span');
+    price.className = 'c-price';
+    price.textContent = won(line.qty * line.unit);
+
+    li.append(name, minus, qty, plus, price);
+    list.appendChild(li);
+  }
+
+  const total = saleCart.reduce((s, c) => s + c.qty * c.unit, 0);
+  $('#saleTotal').textContent = won(total);
+  $('#saleSubmit').disabled = saleCart.length === 0;
+}
+
+function stepBtn(label, cls, onClick) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls;
+  b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+$('#customAdd').addEventListener('click', () => {
+  const name = $('#customName').value.trim();
+  const unit = Number(String($('#customPrice').value).replace(/[^\d]/g, '')) || 0;
+  if (!name) return toast('품목명을 입력해 주세요.', true);
+  if (!unit) return toast('개당 가격을 입력해 주세요.', true);
+  addToSale(name, unit);
+  $('#customName').value = '';
+  $('#customPrice').value = '';
+});
+
+$('#clearSale').addEventListener('click', () => {
+  saleCart = [];
+  renderSaleCart();
+});
+
+$('#saleSubmit').addEventListener('click', async () => {
+  if (!saleCart.length) return;
+  const total = saleCart.reduce((s, c) => s + c.qty * c.unit, 0);
+  const result = await act(() => api('/api/field-sale', {
+    method: 'POST',
+    body: JSON.stringify({
+      items: saleCart.map((c) => ({ name: c.name, qty: c.qty, price: c.qty * c.unit })),
+    }),
+  }));
+  if (result) {
+    saleCart = [];
+    renderSaleCart();
+    toast(`현장 판매 ${won(total)} 등록! 수량에 바로 반영됐습니다.`);
+  }
+});
+
 /* ------------------------------------------------------------ 농라F 연동 */
 
 $('#toggleSetup').addEventListener('click', () => $('#setup').classList.toggle('hidden'));
@@ -275,6 +413,35 @@ $('#saveNongra').addEventListener('click', async () => {
     $('#nongraUrl').value = '';
     $('#nongraPw').value = '';
     $('#setup').classList.add('hidden');
+  }
+});
+
+$('#runDiag').addEventListener('click', async () => {
+  const out = $('#diagOut');
+  out.classList.remove('hidden');
+  out.textContent = '진단 중… (몇 초 걸립니다)';
+  try {
+    const d = await api('/api/nongra/diag');
+    let text = `로그인: ${d.loggedIn ? '됨' : '안 됨'}\n`;
+    text += `게시판 목록 응답: ${d.listStatus} (${fmt(d.listSize)}바이트)\n`;
+    text += `발견한 글 번호: ${d.foundPostIds.join(', ') || '없음 ← 주소가 맞는지 확인'}\n`;
+    for (const p of d.posts) {
+      text += `\n───── 글 #${p.wrId} ─────\n`;
+      if (p.error) {
+        text += `오류: ${p.error}\n`;
+        continue;
+      }
+      text += `제목: ${p.title}\n`;
+      text += `비밀글: ${p.secret ? '예' : '아니오'} · 본문 찾음: ${p.bodyFound ? '예' : '아니오'} · 읽은 품목: ${p.itemsFound}개\n`;
+      if (p.items && p.items.length) {
+        text += `품목: ${p.items.map((i) => `${i.name} ${i.qty}개`).join(', ')}\n`;
+      }
+      text += `본문 미리보기:\n${p.bodyPreview}\n`;
+    }
+    text += '\n※ 이 화면을 캡처해서 보내주시면 사이트에 맞게 조정해 드릴 수 있습니다.';
+    out.textContent = text;
+  } catch (err) {
+    out.textContent = '진단 실패: ' + err.message;
   }
 });
 
