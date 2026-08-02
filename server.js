@@ -18,8 +18,23 @@ const os = require('os');
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const DATA_DIR = path.join(__dirname, 'data');
+
+// 데이터는 프로그램 폴더가 아니라 사용자 홈에 저장합니다.
+// → 프로그램을 새로 내려받아도 주문 기록과 연동 설정(키)이 그대로 유지됩니다.
+const DATA_DIR = process.env.DATA_DIR || path.join(os.homedir(), '.flower-workshop');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
+const OLD_DB_FILE = path.join(__dirname, 'data', 'db.json');
+
+// 예전 버전(프로그램 폴더 안 data/)을 쓰던 경우 한 번만 옮겨옵니다.
+try {
+  if (!fs.existsSync(DB_FILE) && fs.existsSync(OLD_DB_FILE)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.copyFileSync(OLD_DB_FILE, DB_FILE);
+    console.log('  이전 데이터를 새 저장 위치로 옮겼습니다:', DATA_DIR);
+  }
+} catch {
+  /* 옮기기 실패 시 새로 시작 */
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
