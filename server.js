@@ -17,7 +17,7 @@ const path = require('path');
 const os = require('os');
 const alps = require('./alps');
 
-const APP_VERSION = 'v28'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v29'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -905,9 +905,77 @@ const routes = {
 
   /* ---------- 송장 도우미 (롯데 ALPS) ---------- */
 
-  'POST /api/alps/open': async () => {
-    const r = await alps.launch();
-    return { ...r, loginUrl: alps.ALPS_LOGIN_URL };
+  // 송장 창 열기 — 실패하면 스스로 원인을 찾아 고쳐 봅니다.
+  'POST /api/alps/open': async (body) => {
+    const steps = [];
+    const attempts = [
+      { label: '창 열기', opts: { force: Boolean(body.force), browserPath: body.browserPath } },
+      { label: '멈춘 창 정리 후 다시 열기', opts: { force: true, browserPath: body.browserPath } },
+    ];
+
+    let lastErr = null;
+    for (const attempt of attempts) {
+      try {
+        const r = await alps.launch(attempt.opts);
+        steps.push(`${attempt.label}: 성공`);
+        if (r.log) steps.push(...r.log.map((l) => `  · ${l}`));
+        return { ...r, steps, loginUrl: alps.ALPS_LOGIN_URL, browser: alps.findBrowser() };
+      } catch (err) {
+        lastErr = err;
+        steps.push(`${attempt.label}: 실패 — ${err.message.split('\n')[0]}`);
+      }
+    }
+
+    throw httpError(500, `${lastErr ? lastErr.message : '창을 열지 못했습니다.'}\n\n[시도한 내용]\n${steps.join('\n')}`);
+  },
+
+  // 프로그램이 스스로 전체를 점검하고 결과를 알려줍니다.
+  'GET /api/selfcheck': async () => {
+    const lines = [];
+    const problems = [];
+
+    lines.push(`프로그램 버전: ${APP_VERSION}`);
+    lines.push(`데이터 저장 위치: ${DATA_DIR}`);
+
+    // 농라F
+    const n = db.nongra;
+    if (!n.base) {
+      problems.push('농라F 연동이 아직 설정되지 않았습니다. [설정]에서 주소를 저장하세요.');
+    } else {
+      lines.push(`농라F: ${n.base} (${n.boTable})`);
+      lines.push(`  로그인: ${nongraCache.loggedIn ? '됨' : (n.mbId ? '안 됨' : '아이디 미설정')}`);
+      lines.push(`  마지막 확인: ${nongraCache.fetchedAt ? timeLabel(nongraCache.fetchedAt) : '아직'}`);
+      lines.push(`  상품 동기화: ${nongraCache.sales.products.length}종`);
+      lines.push(`  수집한 주문: ${db.orders.filter((o) => o.channel === 'nongra').length}건`);
+      if (nongraCache.error) problems.push(`농라F 오류: ${nongraCache.error}`);
+      if (!nongraCache.sales.products.length) problems.push('농라F 상품이 동기화되지 않았습니다. 판매글 주소를 확인하세요.');
+    }
+
+    // 스토어
+    lines.push(`스마트스토어: ${db.store.clientId ? '연동됨' : '미설정'}${storeCache.error ? ` (오류: ${storeCache.error})` : ''}`);
+
+    // 송장 도우미
+    const exe = alps.findBrowser();
+    lines.push(`송장용 브라우저: ${exe || '못 찾음'}`);
+    if (!exe) problems.push('크롬·엣지·웨일을 찾지 못했습니다. 크롬을 설치하거나 실행 파일 경로를 알려 주세요.');
+    try {
+      const st = await alps.status();
+      lines.push(`송장 창: ${st.message}`);
+      if (st.form) {
+        lines.push(`  송하인: ${st.shipper || '(확인 못 함)'}`);
+        lines.push(`  인식한 칸: ${Object.keys(st.found || {}).length}개`);
+        if (st.missing && st.missing.length) lines.push(`  못 찾은 칸: ${st.missing.join(', ')}`);
+      } else {
+        problems.push(st.message);
+      }
+    } catch (err) {
+      problems.push(`송장 도우미: ${err.message}`);
+    }
+
+    // 주문·매출
+    lines.push(`전체 주문: ${db.orders.length}건 · 이번 장: ${currentSalesLabel()}`);
+
+    return { lines, problems, ok: problems.length === 0 };
   },
 
   'GET /api/alps/status': async () => alps.status(),
