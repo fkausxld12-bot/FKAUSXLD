@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#14532d" />
+<title>현풍 CCTV 앱 설정</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📹</text></svg>" />
+<!--
+  현풍 농장 — EasyViewer Pro 설정 도우미
+  ────────────────────────────────────────────────────────────
+  이 앱에는 밖에서 장치를 자동 등록해 주는 통로(딥링크)가 없습니다.
+  그래서 '자동 등록' 대신 '한 글자도 안 치게' 만들었습니다.
+  농가는 [복사] → [앱] → 길게 눌러 붙여넣기 만 반복하면 됩니다.
+
+  비밀번호는 주소의 # 뒤에만 실립니다. # 뒤는 서버로 전송되지 않습니다.
+  예)  앱-설정-도우미.html#w=비밀번호
+-->
+<style>
+  :root { --green: #14532d; --line: #d8ded8; --muted: #5b6b5f; --done: #067647; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; max-width: 100%; overflow-x: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Noto Sans KR',
+                 'Malgun Gothic', '맑은 고딕', sans-serif;
+    background: #f4f6f4;
+    color: #16211a;
+    -webkit-text-size-adjust: 100%;
+    padding-bottom: 96px; /* 아래 고정 버튼 자리 */
+  }
+
+  header { background: var(--green); color: #fff; padding: 18px 16px; text-align: center; }
+  header h1 { margin: 0; font-size: 22px; }
+  header p { margin: 6px 0 0; font-size: 14px; opacity: 0.88; line-height: 1.5; }
+
+  main { padding: 14px; display: grid; gap: 14px; max-width: 560px; margin: 0 auto; }
+
+  .card {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+  }
+  .card h2 { margin: 0 0 6px; font-size: 18px; }
+  .card p { margin: 0 0 12px; font-size: 14px; color: var(--muted); line-height: 1.6; }
+
+  button {
+    font-family: inherit;
+    font-weight: 700;
+    border: 0;
+    border-radius: 13px;
+    background: var(--green);
+    color: #fff;
+    cursor: pointer;
+    font-size: 18px;
+    min-height: 58px;
+    width: 100%;
+    padding: 12px 14px;
+  }
+  button.ghost {
+    background: #eef2ee;
+    color: var(--green);
+    border: 1px solid var(--line);
+  }
+  button:active { filter: brightness(0.92); }
+
+  /* 복사 줄 */
+  ol.fields { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .field {
+    border: 2px solid var(--line);
+    border-radius: 14px;
+    padding: 12px 12px 12px 14px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 10px;
+    background: #fff;
+  }
+  .field.now { border-color: var(--green); background: #f2f8f4; }
+  .field.done { border-color: var(--done); background: #f3faf5; }
+  .field .label { font-size: 13px; color: var(--muted); }
+  .field .value {
+    font-size: 19px;
+    font-weight: 700;
+    word-break: break-all;
+    line-height: 1.35;
+  }
+  .field button { width: auto; min-width: 92px; min-height: 52px; font-size: 16px; }
+  .field.done button { background: var(--done); }
+
+  .steps { margin: 0; padding-left: 20px; font-size: 15px; line-height: 1.85; }
+  .steps b { color: var(--green); }
+
+  .bar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: rgba(244, 246, 244, 0.96);
+    border-top: 1px solid var(--line);
+  }
+  .bar button { max-width: 560px; margin: 0 auto; display: block; }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 96px;
+    transform: translateX(-50%);
+    background: #16211a;
+    color: #fff;
+    padding: 12px 18px;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 700;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+    max-width: 90vw;
+    text-align: center;
+  }
+  .toast.show { opacity: 1; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📹 현풍 CCTV 앱 설정</h1>
+  <p>한 글자도 치지 않습니다.<br>[복사] 누르고 앱에서 길게 눌러 붙여넣기만 하세요.</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>① 앱 준비</h2>
+    <p>앱이 이미 있으면 그냥 [앱 열기]를 누르세요.</p>
+    <button type="button" id="openApp">📱 EasyViewer Pro 열기</button>
+    <div style="height:10px"></div>
+    <button type="button" class="ghost" id="installApp">앱이 없어요 · 설치하기</button>
+  </section>
+
+  <section class="card">
+    <h2>② 앱에서 여기까지 누르기</h2>
+    <ol class="steps">
+      <li>아래쪽 <b>장치</b></li>
+      <li>오른쪽 위 <b>＋</b></li>
+      <li><b>유선 장치</b> → <b>IP/도메인</b></li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>③ 하나씩 복사해서 붙여넣기</h2>
+    <p>초록색 줄이 지금 할 차례입니다. [복사]를 누르고 앱으로 가서
+      칸을 <b>길게 눌러 붙여넣기</b> 하세요.</p>
+    <ol class="fields" id="fields"></ol>
+  </section>
+
+  <section class="card">
+    <h2>④ 저장</h2>
+    <p>앱 오른쪽 위 <b>저장</b>을 누르면 끝입니다.
+      다음부터는 앱만 열면 화면이 바로 나옵니다.</p>
+  </section>
+</main>
+
+<div class="bar">
+  <button type="button" id="backToApp">📱 앱으로 가기</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+/* ─── 설정값 ──────────────────────────────────────────────────────────
+   비밀번호(w)는 여기 적지 않습니다. 주소 뒤 #w=... 로만 들어옵니다.
+   예) 앱-설정-도우미.html#w=실제비밀번호                              */
+var DEFAULTS = {
+  h: 'eemi124.iptime.org', // 주소
+  p: '37777',              // 포트
+  n: '현풍 농장',           // 장치 이름
+  u: 'admin',              // 사용자 이름
+  w: ''                    // 비밀번호 — # 뒤에서만 받습니다
+};
+
+var PKG = 'com.mm.android.direct.EasyViewerPro';
+var STORE = 'https://play.google.com/store/apps/details?id=' + PKG;
+
+/* 주소의 # 뒤를 읽습니다. (# 뒤는 서버로 전송되지 않습니다) */
+function readHash() {
+  var out = {};
+  var raw = location.hash.replace(/^#/, '');
+  raw.split('&').forEach(function (pair) {
+    if (!pair) return;
+    var i = pair.indexOf('=');
+    if (i < 0) return;
+    var k = decodeURIComponent(pair.slice(0, i));
+    var v = decodeURIComponent(pair.slice(i + 1));
+    if (v) out[k] = v;
+  });
+  return out;
+}
+
+var conf = Object.assign({}, DEFAULTS, readHash());
+
+var FIELDS = [
+  { key: 'h', label: '주소' },
+  { key: 'p', label: '포트' },
+  { key: 'n', label: '장치 이름' },
+  { key: 'u', label: '사용자 이름' },
+  { key: 'w', label: '장치 비밀번호' }
+];
+
+var list = document.getElementById('fields');
+var rows = [];
+
+function toast(text) {
+  var el = document.getElementById('toast');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(function () { el.classList.remove('show'); }, 1800);
+}
+
+/* 안드로이드 크롬은 https 에서만 복사가 됩니다.
+   혹시 막히면 옛날 방식으로 한 번 더 시도합니다. */
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise(function (resolve, reject) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    ok ? resolve() : reject(new Error('복사 실패'));
+  });
+}
+
+function markNext() {
+  var next = rows.filter(function (r) { return !r.done; })[0];
+  rows.forEach(function (r) { r.el.classList.remove('now'); });
+  if (next) next.el.classList.add('now');
+}
+
+function makeRow(field) {
+  var value = conf[field.key] || '';
+
+  var li = document.createElement('li');
+  li.className = 'field';
+
+  var left = document.createElement('div');
+  var label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = field.label;
+  var val = document.createElement('div');
+  val.className = 'value';
+  val.textContent = value || '(비어 있음)';
+  left.appendChild(label);
+  left.appendChild(val);
+
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '복사';
+
+  var row = { el: li, done: false };
+
+  btn.addEventListener('click', function () {
+    if (!value) {
+      toast('이 값이 비어 있습니다. 관리자에게 문의하세요.');
+      return;
+    }
+    copyText(value).then(function () {
+      row.done = true;
+      li.classList.remove('now');
+      li.classList.add('done');
+      btn.textContent = '복사됨 ✓';
+      markNext();
+      toast(field.label + ' 복사했습니다. 앱에서 길게 눌러 붙여넣기');
+    }).catch(function () {
+      toast('복사가 막혔습니다. 값을 길게 눌러 직접 복사해 주세요.');
+    });
+  });
+
+  li.appendChild(left);
+  li.appendChild(btn);
+  rows.push(row);
+  return li;
+}
+
+FIELDS.forEach(function (f) {
+  // 비밀번호가 링크에 없으면 그 줄은 감춥니다. (빈 줄을 보고 헷갈리지 않게)
+  if (f.key === 'w' && !conf.w) return;
+  list.appendChild(makeRow(f));
+});
+markNext();
+
+if (!conf.w) {
+  var warn = document.createElement('p');
+  warn.style.margin = '12px 2px 0';
+  warn.style.color = '#b42318';
+  warn.style.fontSize = '14px';
+  warn.textContent = '비밀번호는 이 링크에 들어 있지 않습니다. 설치해 주신 분께 받은 링크로 다시 들어와 주세요.';
+  list.parentNode.appendChild(warn);
+}
+
+/* 앱 열기 — 설치돼 있으면 앱, 없으면 플레이스토어 */
+function openApp() {
+  if (/Android/i.test(navigator.userAgent)) {
+    location.href = 'intent:#Intent;package=' + PKG
+      + ';action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER'
+      + ';S.browser_fallback_url=' + encodeURIComponent(STORE) + ';end';
+  } else {
+    location.href = STORE;
+  }
+}
+
+document.getElementById('openApp').addEventListener('click', openApp);
+document.getElementById('backToApp').addEventListener('click', openApp);
+document.getElementById('installApp').addEventListener('click', function () {
+  location.href = STORE;
+});
+</script>
+</body>
+</html>

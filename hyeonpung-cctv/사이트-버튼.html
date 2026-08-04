@@ -1,0 +1,101 @@
+<!-- ─────────────────────────────────────────────────────────────────────────
+     현풍 스마트팜 연결 사이트 — CCTV 칸에 이 덩어리만 붙여 넣으세요.
+     (관비기·스마트팜 버튼은 건드리지 않습니다)
+
+     버튼 세 개입니다.
+       ① 현풍 CCTV 보기   — 앱 없이 바로 봅니다. (관비기 컴퓨터의 go2rtc)
+       ② CCTV 앱으로 보기 — 이미 등록해 둔 EasyViewer Pro 를 엽니다.
+       ③ 앱 설정 도우미   — 새 휴대폰일 때. 한 글자도 안 치고 등록합니다.
+
+     비밀번호는 이 파일에 적지 않습니다.
+     농가에게 보내는 링크 뒤에 붙여 주세요.
+       https://…chatgpt.site/#w=실제비밀번호
+     # 뒤는 서버로 전송되지 않고, 이 버튼이 도우미 화면으로 그대로 넘겨 줍니다.
+     ───────────────────────────────────────────────────────────────────── -->
+<section class="cctv-card">
+  <h2>CCTV</h2>
+
+  <button type="button" id="cctvOpen">📹 현풍 CCTV 보기</button>
+  <p class="cctv-hint">앱 없이 4대 화면이 바로 나옵니다.</p>
+
+  <button type="button" id="cctvApp" class="cctv-sub">📱 CCTV 앱으로 보기</button>
+  <button type="button" id="cctvSetup" class="cctv-sub">새 휴대폰인가요? · 앱 설정 도우미</button>
+</section>
+
+<style>
+  .cctv-card {
+    border: 1px solid #d8ded8;
+    border-radius: 16px;
+    background: #fff;
+    padding: 18px;
+    margin: 14px 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Noto Sans KR',
+                 'Malgun Gothic', '맑은 고딕', sans-serif;
+  }
+  .cctv-card h2 { margin: 0 0 12px; font-size: 19px; color: #16211a; }
+  .cctv-card button {
+    width: 100%;
+    min-height: 64px;
+    font-size: 20px;
+    font-weight: 700;
+    font-family: inherit;
+    color: #fff;
+    background: #14532d;
+    border: 0;
+    border-radius: 14px;
+    cursor: pointer;
+  }
+  .cctv-card button.cctv-sub {
+    margin-top: 10px;
+    min-height: 52px;
+    font-size: 16px;
+    color: #14532d;
+    background: #eef2ee;
+    border: 1px solid #d8ded8;
+  }
+  .cctv-card button:active { filter: brightness(0.92); }
+  .cctv-hint { margin: 10px 2px 0; font-size: 14px; color: #5b6b5f; line-height: 1.5; }
+</style>
+
+<script>
+(function () {
+  'use strict';
+
+  // 관비기 컴퓨터에서 돌아가는 CCTV 화면 (go2rtc)
+  var CCTV_URL = 'http://eemi124.iptime.org:1984/';
+
+  // 지금 쓰고 있는 CCTV 앱
+  var PKG = 'com.mm.android.direct.EasyViewerPro';
+  var STORE = 'https://play.google.com/store/apps/details?id=' + PKG;
+
+  var isAndroid = /Android/i.test(navigator.userAgent);
+
+  function openApp() {
+    if (!isAndroid) { location.href = STORE; return; }
+    location.href = 'intent:#Intent;package=' + PKG
+      + ';action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER'
+      + ';S.browser_fallback_url=' + encodeURIComponent(STORE) + ';end';
+  }
+
+  // 이 페이지 주소의 # 뒤에서 비밀번호(w)만 뽑아 도우미 화면으로 넘깁니다.
+  function passFromHash() {
+    var m = /(?:^|&)w=([^&]*)/.exec(location.hash.replace(/^#/, ''));
+    return m ? m[1] : '';
+  }
+
+  document.getElementById('cctvOpen').addEventListener('click', function () {
+    // https 사이트 안에 http 화면을 끼워 넣으면 안드로이드가 막습니다.
+    // 그래서 끼워 넣지 않고 주소를 이동시킵니다.
+    location.href = CCTV_URL;
+  });
+
+  document.getElementById('cctvApp').addEventListener('click', openApp);
+
+  document.getElementById('cctvSetup').addEventListener('click', function () {
+    var w = passFromHash();
+    location.href = '/앱-설정-도우미.html' + (w ? '#w=' + w : '');
+  });
+})();
+</script>

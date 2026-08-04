@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#14532d" />
+<title>현풍 농장 CCTV</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📹</text></svg>" />
+<style>
+  /* 글꼴은 휴대폰에 이미 있는 것만 씁니다.
+     (인터넷에서 글꼴을 받아오지 않으므로 글자가 깨지거나 늦게 뜨지 않습니다) */
+  :root {
+    --green: #14532d;
+    --line: #d8ded8;
+    --muted: #5b6b5f;
+    --bad: #b42318;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; max-width: 100%; overflow-x: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Noto Sans KR',
+                 'Malgun Gothic', '맑은 고딕', sans-serif;
+    background: #f4f6f4;
+    color: #16211a;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  header {
+    background: var(--green);
+    color: #fff;
+    padding: 16px;
+    text-align: center;
+  }
+  header h1 { margin: 0; font-size: 22px; letter-spacing: -0.5px; }
+  header p { margin: 6px 0 0; font-size: 14px; opacity: 0.85; }
+
+  main { padding: 14px; display: grid; gap: 14px; }
+  @media (min-width: 720px) {
+    main { grid-template-columns: 1fr 1fr; max-width: 1100px; margin: 0 auto; }
+  }
+
+  .cam {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  }
+  .cam h2 {
+    margin: 0;
+    padding: 12px 14px;
+    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .screen {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    background: #0d1210;
+  }
+  video-stream { display: block; width: 100%; height: 100%; }
+  video-stream video { width: 100%; height: 100%; object-fit: contain; background: #0d1210; }
+  /* 재생기가 띄우는 영문 상태 글씨(loading/RTC/error)는 농가에게 필요 없어서 가립니다.
+     대신 아래 .cover 로 한국어 안내를 보여 줍니다. */
+  video-stream .info { display: none !important; }
+
+  /* 아직 안 켠 화면 / 점검 중 화면 */
+  .cover {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 16px;
+    color: #e7ece8;
+    text-align: center;
+  }
+  .cover span { font-size: 15px; line-height: 1.5; white-space: pre-line; }
+
+  button {
+    font-family: inherit;
+    font-size: 17px;
+    font-weight: 700;
+    border: 0;
+    border-radius: 12px;
+    padding: 14px 18px;
+    background: var(--green);
+    color: #fff;
+    cursor: pointer;
+    min-height: 52px;      /* 장갑 낀 손으로도 눌리는 크기 */
+    max-width: 100%;
+  }
+  button.small {
+    font-size: 14px;
+    padding: 8px 12px;
+    min-height: 40px;
+    background: #eef2ee;
+    color: var(--green);
+    border: 1px solid var(--line);
+  }
+  button:active { filter: brightness(0.92); }
+
+  .broken h2 { color: var(--bad); }
+  .refresh { padding: 4px 14px 26px; }
+  .refresh button { width: 100%; }
+  .foot { margin: 0; padding: 0 16px 30px; color: var(--muted); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📹 현풍 농장 CCTV</h1>
+  <p>화면이 바로 나옵니다. 앱은 필요 없습니다.</p>
+</header>
+
+<main id="cams"></main>
+
+<div class="refresh"><button type="button" id="reload">🔄 화면 다시 불러오기</button></div>
+<p class="foot">케이팜테크</p>
+
+<!-- go2rtc의 재생기(MIT 라이선스, github.com/AlexxIT/go2rtc 의 www/ 에서 가져옴) -->
+<script type="module">
+import './video-stream.js';
+
+/* 카메라 목록 — 이름만 바꾸면 화면에 그대로 반영됩니다.
+   ok:false 는 지금 고장 난 카메라입니다. 목록에서 지우지 않고 '점검 중'으로 남겨 둡니다. */
+const CAMS = [
+  { src: 'cam1', name: '1번 · 외부',        ok: true },
+  { src: 'cam2', name: '2번 · 하우스 1',    ok: true },
+  { src: 'cam3', name: '3번 · 하우스 2',    ok: true },
+  { src: 'cam4', name: '4번 · 현재 점검 중', ok: false },
+];
+
+const box = document.getElementById('cams');
+
+function makePlayer(src) {
+  const video = document.createElement('video-stream');
+  // webrtc가 안 되는 휴대폰이면 mse → mjpeg 순서로 스스로 내려갑니다.
+  video.mode = 'webrtc,mse,mjpeg';
+  video.background = false; // 화면을 벗어나면 끊어서 데이터를 아낍니다.
+  video.src = new URL('api/ws?src=' + encodeURIComponent(src), location.href);
+  return video;
+}
+
+/* 영상이 실제로 들어왔는지 봅니다.
+   webrtc·mse 는 video 크기로, mjpeg 는 poster 로 확인합니다. */
+function hasPicture(player) {
+  const v = player.querySelector('video');
+  if (!v) return false;
+  return v.videoWidth > 0 || (v.poster || '').length > 100;
+}
+
+/* 나올 때까지 '불러오는 중', 안 나오면 '다시 시도' 를 한국어로 보여 줍니다. */
+function watchPlayer(player, screen, onRetry) {
+  const cover = document.createElement('div');
+  cover.className = 'cover';
+  const msg = document.createElement('span');
+  msg.textContent = '불러오는 중…';
+  cover.appendChild(msg);
+  screen.appendChild(cover);
+
+  const started = Date.now();
+  const timer = setInterval(() => {
+    if (hasPicture(player)) {
+      clearInterval(timer);
+      cover.remove();
+      return;
+    }
+    if (Date.now() - started > 20000) {
+      clearInterval(timer);
+      msg.textContent = '화면을 불러오지 못했습니다.\n관비기 컴퓨터가 켜져 있는지 봐 주세요.';
+      const again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'small';
+      again.textContent = '다시 시도';
+      again.addEventListener('click', onRetry);
+      cover.appendChild(again);
+    }
+  }, 500);
+}
+
+function makeCam(cam) {
+  const card = document.createElement('section');
+  card.className = 'cam' + (cam.ok ? '' : ' broken');
+
+  const title = document.createElement('h2');
+  title.textContent = cam.name;
+  card.appendChild(title);
+
+  const big = document.createElement('button');
+  big.type = 'button';
+  big.className = 'small';
+  big.textContent = '⛶ 크게';
+  title.appendChild(big);
+
+  const screen = document.createElement('div');
+  screen.className = 'screen';
+  card.appendChild(screen);
+
+  let started = false;
+  const start = () => {
+    if (started) return;
+    started = true;
+    const player = makePlayer(cam.src);
+    screen.appendChild(player);
+    watchPlayer(player, screen, () => {
+      screen.textContent = '';
+      started = false;
+      start();
+    });
+  };
+
+  if (cam.ok) {
+    start();
+  } else {
+    // 고장 난 카메라는 검은 화면으로 계속 돌지 않게, 누를 때만 시도합니다.
+    const cover = document.createElement('div');
+    cover.className = 'cover';
+    const msg = document.createElement('span');
+    msg.textContent = '지금 이 카메라는 영상이 오지 않습니다.\n수리하면 그대로 나옵니다.';
+    const tryBtn = document.createElement('button');
+    tryBtn.type = 'button';
+    tryBtn.className = 'small';
+    tryBtn.textContent = '그래도 한번 보기';
+    tryBtn.addEventListener('click', () => {
+      cover.remove();
+      start();
+    });
+    cover.append(msg, tryBtn);
+    screen.appendChild(cover);
+  }
+
+  big.addEventListener('click', () => {
+    start();
+    if (screen.requestFullscreen) screen.requestFullscreen();
+    else if (screen.webkitRequestFullscreen) screen.webkitRequestFullscreen();
+  });
+
+  return card;
+}
+
+function draw() {
+  box.textContent = '';
+  for (const cam of CAMS) box.appendChild(makeCam(cam));
+}
+
+document.getElementById('reload').addEventListener('click', draw);
+draw();
+</script>
+</body>
+</html>
