@@ -1,0 +1,52 @@
+# 현풍 농장 CCTV — go2rtc 설정
+#
+# 이 파일은 관비기 컴퓨터에만 둡니다. 인터넷에 올리지 마세요. (비밀번호가 들어갑니다)
+# 아래 PASSWORD 자리에 NVR 비밀번호를 넣고 저장하면 끝입니다.
+#
+# 하는 일: NVR(다후아)에서 RTSP로 영상을 받아, 휴대폰 브라우저가 그대로 볼 수 있는
+#          형태(WebRTC)로 바꿔 내보냅니다. 농가 휴대폰에는 앱을 깔 필요가 없습니다.
+
+api:
+  listen: ":1984"
+  # 농가에게 보여줄 화면(cctv-web 폴더)을 여기서 같이 내보냅니다.
+  static_dir: "./cctv-web"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555/tcp"
+  # 집 밖(LTE)에서도 보이게 하려면 공인 주소를 알려줍니다.
+  candidates:
+    - eemi124.iptime.org:8555
+    - stun:8555
+
+streams:
+  # 카메라마다 두 줄입니다.
+  #   첫 줄  = NVR에서 그대로 받기 (H.265 그대로)
+  #   둘째 줄 = 휴대폰이 H.265를 못 볼 때 H.264로 바꿔 주기 (검은 화면 방지)
+  # go2rtc가 그 휴대폰이 볼 수 있는 쪽을 알아서 고릅니다.
+  #
+  # 관비기 컴퓨터가 NVR과 같은 공유기 안에 있다면 eemi124.iptime.org 대신
+  # NVR의 내부 주소(예: 192.168.0.50)를 쓰는 편이 더 빠르고 안정적입니다.
+
+  cam1:
+    - rtsp://admin:PASSWORD@eemi124.iptime.org:554/cam/realmonitor?channel=1&subtype=1
+    - ffmpeg:cam1#video=h264#hardware
+
+  cam2:
+    - rtsp://admin:PASSWORD@eemi124.iptime.org:554/cam/realmonitor?channel=2&subtype=1
+    - ffmpeg:cam2#video=h264#hardware
+
+  cam3:
+    - rtsp://admin:PASSWORD@eemi124.iptime.org:554/cam/realmonitor?channel=3&subtype=1
+    - ffmpeg:cam3#video=h264#hardware
+
+  # 4번은 지금 영상 응답이 없습니다. 목록에서 지우지 않고 그대로 둡니다.
+  # 고쳐지면 설정을 건드릴 필요 없이 바로 나옵니다.
+  cam4:
+    - rtsp://admin:PASSWORD@eemi124.iptime.org:554/cam/realmonitor?channel=4&subtype=1
+    - ffmpeg:cam4#video=h264#hardware
+
+log:
+  level: info
