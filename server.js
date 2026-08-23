@@ -15,9 +15,10 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
 const alps = require('./alps');
 
-const APP_VERSION = 'v29'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v30'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -75,6 +76,8 @@ const emptyDb = () => ({
   },
   // 판매일(장) 경계: 새 발송글 기준으로 매출 날짜를 나눕니다.
   salesDays: [], // [{ id, at, label: 'YYYY-MM-DD' }]
+  // 경매 매입 내역: 공판장 거래내역(낙찰서) 엑셀을 올리면 날짜별로 기록됩니다.
+  purchases: [], // [{ id, date, buyer, category, filename, uploadedAt, items, totalAmount, totalBoxes, totalBunches }]
   // 송장(ALPS) 등록 기록: 주문 id → { at, orderNo } (이중 발행 방지)
   invoices: {},
   // 문자 주문 안내 문구 설정
@@ -101,6 +104,7 @@ function loadDb() {
       history: Array.isArray(raw.history) ? raw.history : [],
       orderSeq: Number(raw.orderSeq) || 0,
       salesDays: Array.isArray(raw.salesDays) ? raw.salesDays : [],
+      purchases: Array.isArray(raw.purchases) ? raw.purchases : [],
       smsInfo: { account: (raw.smsInfo && raw.smsInfo.account) || base.smsInfo.account },
       invoices: raw.invoices && typeof raw.invoices === 'object' ? raw.invoices : {},
       nongra: {
@@ -325,7 +329,243 @@ function salesSummary() {
     }
     map.set(label, row);
   }
+  // 매입(낙찰서)을 같은 날짜 줄에 합칩니다. 주문이 아직 없어도 매입만으로 줄이 생깁니다.
+  for (const p of db.purchases) {
+    const row = map.get(p.date) || { label: p.date, count: 0, qty: 0, amount: 0 };
+    row.purchase = (row.purchase || 0) + p.totalAmount;
+    map.set(p.date, row);
+  }
   return [...map.values()].sort((a, b) => b.label.localeCompare(a.label)).slice(0, 14);
+}
+
+/* ------------------------------------------------- 매입 (경매 낙찰서 엑셀) */
+
+// .xlsx는 안이 zip으로 묶인 XML 묶음입니다. 외부 패키지 없이 Node 내장 zlib로 풉니다.
+function unzipEntries(buf) {
+  const bad = () => httpError(400, '엑셀 파일(.xlsx)이 아닙니다. 공판장에서 내려받은 낙찰서 엑셀을 그대로 올려 주세요.');
+  if (buf.length < 22) throw bad();
+  let eocd = -1; // 파일 끝쪽의 목차 위치 표식을 찾습니다.
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i -= 1) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw bad();
+  const count = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  const entries = new Map();
+  try {
+    for (let i = 0; i < count; i += 1) {
+      if (off + 46 > buf.length || buf.readUInt32LE(off) !== 0x02014b50) break;
+      const method = buf.readUInt16LE(off + 10);
+      const csize = buf.readUInt32LE(off + 20);
+      const nameLen = buf.readUInt16LE(off + 28);
+      const extraLen = buf.readUInt16LE(off + 30);
+      const commentLen = buf.readUInt16LE(off + 32);
+      const localOff = buf.readUInt32LE(off + 42);
+      const name = buf.toString('utf8', off + 46, off + 46 + nameLen);
+      // 실제 내용 위치는 각 항목 머리글의 이름/추가정보 길이를 다시 읽어야 정확합니다.
+      const dataStart = localOff + 30 + buf.readUInt16LE(localOff + 26) + buf.readUInt16LE(localOff + 28);
+      const raw = buf.slice(dataStart, dataStart + csize);
+      entries.set(name, method === 0 ? raw : zlib.inflateRawSync(raw));
+      off += 46 + nameLen + extraLen + commentLen;
+    }
+  } catch {
+    throw bad();
+  }
+  if (!entries.size) throw bad();
+  return entries;
+}
+
+// XML 안의 &#44397; 같은 표기를 원래 글자로 되돌립니다.
+function xmlDecode(text) {
+  return String(text)
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+}
+
+function textOfIs(inner) {
+  let text = '';
+  const re = /<t[^>]*>([\s\S]*?)<\/t>/g;
+  let m;
+  while ((m = re.exec(inner))) text += m[1];
+  return xmlDecode(text);
+}
+
+// 시트 XML → { 'A12' → 값 } 형태. 문자열은 글자로, 숫자는 숫자로 돌려줍니다.
+function sheetCells(xml, shared) {
+  const cells = new Map();
+  const re = /<c\s([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+  let m;
+  while ((m = re.exec(xml))) {
+    const attrs = m[1];
+    const inner = m[2] || '';
+    const ref = (attrs.match(/(?:^|\s)r="([A-Z]+\d+)"/) || [])[1];
+    if (!ref) continue;
+    const type = (attrs.match(/(?:^|\s)t="([^"]+)"/) || [])[1] || 'n';
+    let value = null;
+    if (type === 'inlineStr') {
+      value = textOfIs(inner);
+    } else {
+      const v = inner.match(/<v[^>]*>([\s\S]*?)<\/v>/);
+      if (!v) continue;
+      if (type === 's') value = xmlDecode(String(shared[Number(v[1])] ?? ''));
+      else if (type === 'str') value = xmlDecode(v[1]);
+      else value = Number(v[1]);
+    }
+    if (value !== null && value !== '') cells.set(ref, value);
+  }
+  return cells;
+}
+
+function sharedStringsOf(xml) {
+  const out = [];
+  const re = /<si>([\s\S]*?)<\/si>/g;
+  let m;
+  while ((m = re.exec(String(xml || '')))) out.push(textOfIs(m[1]));
+  return out;
+}
+
+// 날짜가 "2026-08-24" / "2026.8.24" / "20260824" / 엑셀 날짜 숫자 어느 쪽이어도 통일합니다.
+function normalizeDateCell(value) {
+  if (typeof value === 'number' && value > 20000 && value < 80000) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.round(value) * 86400000);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  }
+  const s = String(value ?? '').trim();
+  let m = s.match(/(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})/);
+  if (m) return `${m[1]}-${String(Number(m[2])).padStart(2, '0')}-${String(Number(m[3])).padStart(2, '0')}`;
+  m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return '';
+}
+
+// 열 제목 글자를 보고 어떤 정보인지 알아냅니다. (공판장마다 표기가 조금씩 다릅니다)
+function purchaseFieldOf(header) {
+  const h = String(header).replace(/\s+/g, '');
+  if (!h) return '';
+  if (h.includes('품종')) return 'variety';
+  if (h.includes('품목') || h === '품명') return 'item';
+  if (h.includes('등급')) return 'grade';
+  if (h.includes('상자')) return 'boxes';
+  if (h.includes('속') || h.includes('본수') || h.includes('수량')) return 'bunches';
+  if (h.includes('단가')) return 'unitPrice';
+  if (h.includes('금액')) return 'amount';
+  if (h.includes('상장')) return 'lot';
+  if (h.includes('출하')) return 'shipper';
+  return '';
+}
+
+/**
+ * 공판장 거래내역(낙찰서) 엑셀을 읽어 매입 기록으로 바꿉니다.
+ * 위쪽의 "경매일자/중도매인/부류" 안내 칸과, "품목명…매입금액" 제목 줄을 찾아
+ * 그 아래 줄들을 매입 내역으로 읽습니다. "합계" 줄을 만나면 끝냅니다.
+ */
+function parseAuctionXlsx(buf) {
+  const entries = unzipEntries(buf);
+  const shared = sharedStringsOf(entries.has('xl/sharedStrings.xml') ? entries.get('xl/sharedStrings.xml').toString('utf8') : '');
+  const sheetNames = [...entries.keys()].filter((n) => /^xl\/worksheets\/[^/]+\.xml$/.test(n)).sort();
+  if (!sheetNames.length) throw httpError(400, '엑셀 파일 안에서 표를 찾지 못했습니다.');
+
+  let lastError = null;
+  for (const sheetName of sheetNames) {
+    try {
+      return parseAuctionSheet(sheetCells(entries.get(sheetName).toString('utf8'), shared));
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || httpError(400, '낙찰 내역을 찾지 못했습니다.');
+}
+
+function parseAuctionSheet(cells) {
+  // 칸들을 줄 단위로 모읍니다.
+  const rows = new Map();
+  for (const [ref, value] of cells) {
+    const m = ref.match(/^([A-Z]+)(\d+)$/);
+    if (!m) continue;
+    if (!rows.has(Number(m[2]))) rows.set(Number(m[2]), new Map());
+    rows.get(Number(m[2])).set(m[1], value);
+  }
+  const rowNos = [...rows.keys()].sort((a, b) => a - b);
+
+  // 제목 줄(품목/금액이 같이 있는 줄)을 찾고, 각 열이 무슨 정보인지 기억합니다.
+  let headerRow = 0;
+  const colField = new Map();
+  for (const rowNo of rowNos) {
+    const fields = new Map();
+    for (const [col, value] of rows.get(rowNo)) {
+      const field = typeof value === 'string' ? purchaseFieldOf(value) : '';
+      if (field && !fields.has(field)) fields.set(field, col);
+    }
+    if ((fields.has('item') || fields.has('variety')) && fields.has('amount')) {
+      headerRow = rowNo;
+      for (const [field, col] of fields) colField.set(col, field);
+      break;
+    }
+  }
+  if (!headerRow) {
+    throw httpError(400, '낙찰 내역 표를 찾지 못했습니다. 공판장에서 내려받은 거래내역(낙찰서) 엑셀이 맞는지 확인해 주세요.');
+  }
+
+  // 제목 줄 위의 안내 칸에서 경매일자·중도매인·부류를 읽습니다.
+  let date = '';
+  let buyer = '';
+  let category = '';
+  for (const rowNo of rowNos) {
+    if (rowNo >= headerRow) break;
+    const line = [...rows.get(rowNo).entries()].sort((a, b) => a[0].length - b[0].length || (a[0] < b[0] ? -1 : 1));
+    for (let i = 0; i < line.length; i += 1) {
+      const label = String(line[i][1]);
+      const next = line[i + 1] ? line[i + 1][1] : '';
+      // "경매일자 : 2026-08-24"처럼 한 칸에 같이 적힌 파일도 있어 라벨 칸에서도 다시 찾습니다.
+      const inLabel = label.includes(':') || label.includes('：') ? label.split(/[:：]/).slice(1).join(':').trim() : '';
+      if (/경매일자|거래일자/.test(label) && !date) date = normalizeDateCell(next) || normalizeDateCell(label);
+      else if (/중도매인/.test(label) && !buyer) buyer = String(next).trim() || inLabel;
+      else if (/부류/.test(label) && !category) category = String(next).trim() || inLabel;
+    }
+  }
+
+  const items = [];
+  let reported = null; // 파일에 적힌 합계 (검산용)
+  for (const rowNo of rowNos) {
+    if (rowNo <= headerRow) continue;
+    const line = rows.get(rowNo);
+    const get = (field) => {
+      for (const [col, f] of colField) if (f === field) return line.get(col);
+      return undefined;
+    };
+    const firstCell = String([...line.values()][0] ?? '');
+    if (/합계|총계/.test(firstCell)) {
+      reported = { boxes: num(get('boxes')), bunches: num(get('bunches')), amount: num(get('amount')) };
+      break;
+    }
+    const item = String(get('item') ?? '').trim();
+    const amount = num(get('amount'));
+    if (!item && !amount) continue; // 빈 줄
+    items.push({
+      item: item || String(get('variety') ?? '').trim(),
+      variety: String(get('variety') ?? '').trim(),
+      grade: String(get('grade') ?? '').trim(),
+      boxes: num(get('boxes')),
+      bunches: num(get('bunches')),
+      unitPrice: num(get('unitPrice')),
+      amount,
+      lot: String(get('lot') ?? '').trim(),
+      shipper: String(get('shipper') ?? '').trim(),
+    });
+  }
+  if (!items.length) throw httpError(400, '낙찰 내역이 한 줄도 없습니다. 파일을 확인해 주세요.');
+  if (!date) throw httpError(400, '경매일자를 찾지 못했습니다. 공판장에서 내려받은 낙찰서 엑셀이 맞는지 확인해 주세요.');
+
+  const totalAmount = items.reduce((s, it) => s + it.amount, 0);
+  const totalBoxes = items.reduce((s, it) => s + it.boxes, 0);
+  const totalBunches = items.reduce((s, it) => s + it.bunches, 0);
+  let warning = '';
+  if (reported && reported.amount && reported.amount !== totalAmount) {
+    warning = `파일에 적힌 합계(${reported.amount.toLocaleString('ko-KR')}원)와 계산한 합계(${totalAmount.toLocaleString('ko-KR')}원)가 다릅니다. 파일을 한번 확인해 주세요.`;
+  }
+  return { date, buyer, category, items, totalAmount, totalBoxes, totalBunches, warning };
 }
 
 /* ---------------------------------------------------------------- 라우팅 */
@@ -353,6 +593,7 @@ const routes = {
     smsAccount: db.smsInfo.account,
     invoices: db.invoices,
     salesDays: db.salesDays.slice(-5),
+    purchases: db.purchases,
     currentLabel: currentSalesLabel(),
     salesSummary: salesSummary(),
     version: APP_VERSION,
@@ -372,6 +613,50 @@ const routes = {
     const removed = db.salesDays.pop();
     logHistory('sale', `판매일 취소: ${removed.label}`);
     return { currentLabel: currentSalesLabel() };
+  },
+
+  /* ---------- 매입 (경매 낙찰서) ---------- */
+
+  // 공판장 거래내역(낙찰서) 엑셀 업로드 → 날짜별 매입 기록
+  'POST /api/purchases/upload': (body) => {
+    const b64 = String(body.data || '').replace(/^data:[^,]*,/, '').replace(/\s+/g, '');
+    if (!b64) throw httpError(400, '올릴 파일이 없습니다.');
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length) throw httpError(400, '파일 내용을 읽지 못했습니다. 다시 올려 주세요.');
+
+    const parsed = parseAuctionXlsx(buf);
+    const replaced = db.purchases.some((p) => p.date === parsed.date);
+    const record = {
+      id: nextId(),
+      date: parsed.date,
+      buyer: parsed.buyer,
+      category: parsed.category,
+      items: parsed.items,
+      totalAmount: parsed.totalAmount,
+      totalBoxes: parsed.totalBoxes,
+      totalBunches: parsed.totalBunches,
+      filename: String(body.filename || '').slice(0, 120),
+      uploadedAt: new Date().toISOString(),
+    };
+    // 같은 경매일자를 다시 올리면 새 파일 내용으로 바꿉니다. (실수해도 다시 올리면 됩니다)
+    db.purchases = db.purchases.filter((p) => p.date !== parsed.date);
+    db.purchases.push(record);
+    db.purchases.sort((a, b) => b.date.localeCompare(a.date));
+    if (db.purchases.length > 30) db.purchases.length = 30; // 한 달치만 보관
+
+    logHistory('purchase',
+      `낙찰서 등록: ${record.date} 매입 ${record.totalAmount.toLocaleString('ko-KR')}원 (${record.items.length}줄)`
+      + (replaced ? ' — 같은 날짜를 새 파일로 바꿈' : ''));
+    return { purchase: record, replaced, warning: parsed.warning || '' };
+  },
+
+  // 잘못 올린 낙찰서 삭제 (언제든 다시 올릴 수 있습니다)
+  'DELETE /api/purchases/:id': (_body, { id }) => {
+    const idx = db.purchases.findIndex((p) => p.id === id);
+    if (idx < 0) throw httpError(404, '매입 기록을 찾을 수 없습니다.');
+    const [removed] = db.purchases.splice(idx, 1);
+    logHistory('purchase', `낙찰서 삭제: ${removed.date} (${removed.totalAmount.toLocaleString('ko-KR')}원)`);
+    return { ok: true };
   },
 
   /* ---------- 재고(품목) ---------- */
@@ -974,6 +1259,11 @@ const routes = {
 
     // 주문·매출
     lines.push(`전체 주문: ${db.orders.length}건 · 이번 장: ${currentSalesLabel()}`);
+
+    // 매입 (낙찰서)
+    lines.push(db.purchases.length
+      ? `매입 낙찰서: ${db.purchases.length}건 (최근 ${db.purchases[0].date} · ${db.purchases[0].totalAmount.toLocaleString('ko-KR')}원)`
+      : '매입 낙찰서: 아직 없음 — 공판장 낙찰서 엑셀을 올리면 날짜별 매입·남는 돈이 나옵니다.');
 
     return { lines, problems, ok: problems.length === 0 };
   },
@@ -2224,15 +2514,19 @@ function matchRoute(method, pathname) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let raw = '';
+    const chunks = [];
+    let size = 0;
     req.on('data', (chunk) => {
-      raw += chunk;
-      if (raw.length > 1e6) reject(httpError(413, '내용이 너무 큽니다.'));
+      chunks.push(chunk);
+      size += chunk.length;
+      // 낙찰서 엑셀(base64)까지 들어오므로 넉넉하게 잡습니다.
+      if (size > 8e6) reject(httpError(413, '내용이 너무 큽니다.'));
     });
     req.on('end', () => {
-      if (!raw) return resolve({});
+      if (!size) return resolve({});
       try {
-        resolve(JSON.parse(raw));
+        // 한 번에 합쳐서 읽어야 한글이 조각 경계에서 깨지지 않습니다.
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       } catch {
         reject(httpError(400, '잘못된 요청입니다.'));
       }
