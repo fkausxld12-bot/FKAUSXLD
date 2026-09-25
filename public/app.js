@@ -106,6 +106,7 @@ function orderTotal(order) {
 function render() {
   renderSummary();
   renderSalesDays();
+  renderPurchases();
   renderNongraStatus();
   renderStoreStatus();
   renderQty();
@@ -134,8 +135,17 @@ function renderSalesDays() {
     const li = document.createElement('li');
     li.className = 'item';
     const isCurrent = r.label === state.currentLabel;
+    // 낙찰서를 올린 날짜는 매입과 남는 돈(매출-매입)도 같이 보여줍니다.
+    const profitLine = r.purchase == null ? '' : (() => {
+      const profit = r.amount - r.purchase;
+      return `<div class="item-sub">매입 ${won(r.purchase)} · 남는 돈
+        <b class="${profit >= 0 ? 'profit-plus' : 'profit-minus'}">${won(profit)}</b></div>`;
+    })();
     li.innerHTML = `
-      <div class="item-info"><div class="item-name">${labelText(r.label)}${isCurrent ? ' <span class="chip status-ready">진행 중</span>' : ''}</div></div>
+      <div class="item-info">
+        <div class="item-name">${labelText(r.label)}${isCurrent ? ' <span class="chip status-ready">진행 중</span>' : ''}</div>
+        ${profitLine}
+      </div>
       <div class="stock-n">${fmt(r.count)}<small>주문</small></div>
       <div class="stock-n">${fmt(r.qty)}<small>수량</small></div>
       <div class="stock-n" style="min-width:90px">${fmt(r.amount)}<small>매출(원)</small></div>`;
@@ -168,6 +178,88 @@ $('#newSalesDay').addEventListener('click', () => {
 $('#undoSalesDay').addEventListener('click', () => {
   if (!confirm('마지막 판매일 시작을 취소할까요?')) return;
   act(() => api('/api/salesday/undo', { method: 'POST', body: '{}' }), '되돌렸습니다.');
+});
+
+/* ------------------------------------------------ 매입 (경매 낙찰서) */
+
+const openPurchases = new Set(); // [자세히]로 펼쳐 둔 날짜들 (3초 새로고침에도 유지)
+
+function renderPurchases() {
+  const list = $('#purchaseList');
+  list.innerHTML = '';
+  const purchases = state.purchases || [];
+  $('#emptyPurchase').classList.toggle('hidden', purchases.length > 0);
+
+  for (const p of purchases) {
+    const li = document.createElement('li');
+    li.className = 'item';
+
+    const info = document.createElement('div');
+    info.className = 'item-info';
+    info.innerHTML = `
+      <div class="item-name">${labelText(p.date)} 낙찰${p.category ? ` <span class="chip">${escapeHtml(p.category)}</span>` : ''}</div>
+      <div class="item-sub">${p.date} · ${fmt(p.totalBoxes)}상자 · ${fmt(p.totalBunches)}속 · ${fmt(p.items.length)}줄${p.filename ? ` · ${escapeHtml(p.filename)}` : ''}</div>`;
+
+    const total = document.createElement('div');
+    total.className = 'stock-n';
+    total.style.minWidth = '90px';
+    total.innerHTML = `${fmt(p.totalAmount)}<small>매입(원)</small>`;
+
+    const opened = openPurchases.has(p.id);
+    const toggle = toolBtn(opened ? '접기' : '자세히', () => {
+      if (opened) openPurchases.delete(p.id);
+      else openPurchases.add(p.id);
+      renderPurchases();
+    });
+    const del = toolBtn('삭제', () =>
+      confirm(`${p.date} 낙찰서 기록을 삭제할까요? 파일을 다시 올리면 언제든 복구됩니다.`) &&
+      act(() => api(`/api/purchases/${p.id}`, { method: 'DELETE' }), '삭제했습니다.'), true);
+
+    li.append(info, total, toggle, del);
+    list.appendChild(li);
+
+    if (opened) {
+      const detail = document.createElement('li');
+      detail.className = 'purchase-detail';
+      detail.innerHTML = `<div class="ptable-wrap"><table class="ptable">
+        <tr><th>품목</th><th>품종</th><th>등급</th><th class="num">상자</th><th class="num">속수량</th><th class="num">단가</th><th class="num">금액</th><th>출하자</th></tr>
+        ${p.items.map((it) => `<tr>
+          <td>${escapeHtml(it.item)}</td><td>${escapeHtml(it.variety)}</td><td>${escapeHtml(it.grade)}</td>
+          <td class="num">${fmt(it.boxes)}</td><td class="num">${fmt(it.bunches)}</td>
+          <td class="num">${fmt(it.unitPrice)}</td><td class="num">${fmt(it.amount)}</td>
+          <td>${escapeHtml(it.shipper)}</td></tr>`).join('')}
+        <tr class="sum"><td>합계</td><td></td><td></td>
+          <td class="num">${fmt(p.totalBoxes)}</td><td class="num">${fmt(p.totalBunches)}</td><td></td>
+          <td class="num">${fmt(p.totalAmount)}</td><td></td></tr>
+      </table></div>`;
+      list.appendChild(detail);
+    }
+  }
+}
+
+$('#purchasePick').addEventListener('click', () => $('#purchaseFile').click());
+
+$('#purchaseFile').addEventListener('change', async (event) => {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = ''; // 같은 파일을 다시 골라도 또 올라가게
+  if (!file) return;
+
+  const data = await new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(file);
+  });
+  if (!data) return toast('파일을 읽지 못했습니다. 다시 골라 주세요.', true);
+
+  await act(
+    () => api('/api/purchases/upload', { method: 'POST', body: JSON.stringify({ filename: file.name, data }) }),
+    (r) => {
+      const p = r.purchase;
+      const base = `${p.date} 매입 ${won(p.totalAmount)} (${p.items.length}줄) 기록했습니다.${r.replaced ? ' 같은 날짜라 새 파일로 바꿨습니다.' : ''}`;
+      return r.warning ? `${base} ⚠ ${r.warning}` : base;
+    },
+  );
 });
 
 function renderStoreStatus() {

@@ -355,6 +355,24 @@ textarea { width: 100%; resize: vertical; }
 .item.soldout { opacity: .55; }
 .soldout-chip { background: var(--danger); color: #fff; font-size: 11px; }
 
+/* ------------------------------------------------- 매입 (경매 낙찰서) */
+
+.profit-plus { color: var(--brand); }
+.profit-minus { color: var(--danger); }
+
+.purchase-detail { border-bottom: 1px solid var(--line); }
+.ptable-wrap { padding: 4px 16px 14px; overflow-x: auto; }
+.ptable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ptable th, .ptable td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+.ptable th { color: var(--muted); font-weight: 600; font-size: 12px; }
+.ptable th.num, .ptable td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ptable tr.sum td { font-weight: 700; border-bottom: 0; }
+
 /* ------------------------------------------------------------ 기록 */
 
 .history { list-style: none; margin: 0; padding: 0; }

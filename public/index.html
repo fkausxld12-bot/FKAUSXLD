@@ -34,10 +34,27 @@
     </div>
     <p class="hint pad-h">농라F에 새 판매글이 올라오면 자동으로 다음 날짜 매출로 넘어갑니다.
       직접 넣으려면 <b>새 판매일 시작</b> — 날짜와 <b>시작 시각</b>을 지정할 수 있어서,
-      지난 시각(예: 어제 18:00)으로 소급해 나눌 수도 있습니다. 매출은 배송비를 뺀 물품 금액입니다.</p>
+      지난 시각(예: 어제 18:00)으로 소급해 나눌 수도 있습니다. 매출은 배송비를 뺀 물품 금액이고,
+      아래에서 낙찰서를 올린 날짜는 <b>매입과 남는 돈(매출−매입)</b>도 함께 나옵니다.</p>
     <p class="hint pad-h hidden" id="salesDayBounds"></p>
     <ul class="items" id="salesDayList"></ul>
     <p class="empty hidden" id="emptySalesDay">주문이 들어오면 날짜별 매출이 자동으로 집계됩니다.</p>
+  </section>
+
+  <!-- 매입 내역 (경매 낙찰서) -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>매입 내역 (경매 낙찰서)</h2>
+      <div class="row-gap">
+        <button type="button" class="primary" id="purchasePick">📥 낙찰서 엑셀 올리기</button>
+        <input type="file" id="purchaseFile" accept=".xlsx" class="hidden" />
+      </div>
+    </div>
+    <p class="hint pad-h">공판장에서 내려받은 <b>거래내역(낙찰서) 엑셀</b>을 올리면
+      그날 산 꽃과 매입금액이 자동으로 기록되고, 위 <b>날짜별 매출</b>에 남는 돈이 함께 나옵니다.
+      같은 날짜를 다시 올리면 새 파일 내용으로 바뀌고, 잘못 올렸으면 [삭제] 후 다시 올리면 됩니다.</p>
+    <ul class="items" id="purchaseList"></ul>
+    <p class="empty hidden" id="emptyPurchase">아직 올린 낙찰서가 없습니다.</p>
   </section>
 
   <!-- 농라F 연동 -->

@@ -202,6 +202,90 @@ function fnSave() {
 </script></body></html>`);
 });
 
+/* ------------------------------------------------ 모의 낙찰서 엑셀 */
+
+// 공판장 낙찰서와 같은 구조의 .xlsx를 외부 패키지 없이 만들어 업로드를 점검합니다.
+// (실제 파일처럼 한글이 &#숫자; 표기인 칸, 공유 문자열, 그냥 한글 칸을 섞어 둡니다)
+
+let crcTable = null;
+function crc32(buf) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n += 1) {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[n] = c >>> 0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i += 1) crc = (crc >>> 8) ^ crcTable[(crc ^ buf[i]) & 0xFF];
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function zipStore(files) { // [[이름, 내용]] → 압축 없이 담은 zip Buffer
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, content] of files) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const data = Buffer.from(content, 'utf8');
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    parts.push(local, nameBuf, data);
+    const cen = Buffer.alloc(46);
+    cen.writeUInt32LE(0x02014b50, 0);
+    cen.writeUInt16LE(20, 4);
+    cen.writeUInt16LE(20, 6);
+    cen.writeUInt32LE(crc, 16);
+    cen.writeUInt32LE(data.length, 20);
+    cen.writeUInt32LE(data.length, 24);
+    cen.writeUInt16LE(nameBuf.length, 28);
+    cen.writeUInt32LE(offset, 42);
+    central.push(cen, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+  const centralBuf = Buffer.concat(central);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(centralBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, centralBuf, eocd]);
+}
+
+function buildAuctionXlsx() {
+  const inline = (ref, text) => `<c r="${ref}" t="inlineStr"><is><t>${text}</t></is></c>`;
+  const numCell = (ref, n) => `<c r="${ref}" t="n"><v>${n}</v></c>`;
+  const sheet = `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+<row r="2">${inline('A2', '&#44144;&#47000;&#45236;&#50669;(&#45209;&#52272;&#49436;)')}</row>
+<row r="6">${inline('A6', '&#51473;&#46020;&#47588;&#51064;')}<c r="B6" t="s"><v>0</v></c></row>
+<row r="7">${inline('A7', '화훼부류')}${inline('B7', '절화')}</row>
+<row r="8">${inline('A8', '&#44221;&#47588;&#51068;&#51088;')}${inline('B8', '2026-08-24')}</row>
+<row r="11">${inline('A11', '&#54408;&#47785;&#47749;')}${inline('B11', '품종명')}${inline('C11', '등급')}${inline('D11', '상자수')}${inline('E11', '속수량')}${inline('F11', '단가')}${inline('G11', '매입금액')}${inline('H11', '상장번호')}${inline('I11', '출하자')}</row>
+<row r="12">${inline('A12', '&#44397;&#54868;')}${inline('B12', '설국')}${inline('C12', '특3')}${numCell('D12', '1.0')}${numCell('E12', '40.0')}${numCell('F12', '2340.0')}${numCell('G12', '93600.0')}${inline('H12', 'B0084-01')}${inline('I12', '김왕규')}</row>
+<row r="13">${inline('A13', '장미')}${inline('B13', '스프레이')}${inline('C13', '특3')}${numCell('D13', '2.0')}${numCell('E13', '13.0')}${numCell('F13', '10600.0')}${numCell('G13', '137800.0')}${inline('H13', 'A0758-01')}${inline('I13', '로즈피아')}</row>
+<row r="14">${inline('A14', '합계')}${numCell('D14', '3.0')}${numCell('E14', '53.0')}${numCell('G14', '231400.0')}</row>
+</sheetData></worksheet>`;
+  const shared = `<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si><t>명정원예영농조</t></si></sst>`;
+  const workbook = `<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="거래내역(낙찰서)" sheetId="1"/></sheets></workbook>`;
+  return zipStore([
+    ['[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'],
+    ['xl/workbook.xml', workbook],
+    ['xl/sharedStrings.xml', shared],
+    ['xl/worksheets/sheet1.xml', sheet],
+  ]);
+}
+
 /* ------------------------------------------------ 점검 실행 */
 
 let appProc = null;
@@ -329,7 +413,55 @@ async function main() {
   check('발송글 기준 날짜 분리', Boolean(rows['2026-08-03']), Object.keys(rows).join(','));
   check('매출은 배송비 제외 물품 금액', (rows['2026-08-03'] || {}).amount > 0);
 
-  console.log('\n[7] 송장 도우미 (롯데 ALPS)');
+  console.log('\n[7] 매입 (경매 낙찰서 엑셀)');
+  const xlsx64 = buildAuctionXlsx().toString('base64');
+  const up = await api('/api/purchases/upload', {
+    method: 'POST',
+    body: JSON.stringify({ filename: '거래내역(낙찰서).xlsx', data: xlsx64 }),
+  });
+  const bought = up.data.purchase || {};
+  check('낙찰서 엑셀 업로드·해석 (한글 &#표기 포함)',
+    up.ok && bought.date === '2026-08-24' && bought.items.length === 2,
+    up.data.error || JSON.stringify(bought).slice(0, 120));
+  check('품목·단가·금액 읽기',
+    up.ok && bought.items[0].item === '국화' && bought.items[0].unitPrice === 2340
+    && bought.items[1].amount === 137800);
+  check('매입 합계 계산 (합계 줄과 검산)',
+    up.ok && bought.totalAmount === 231400 && bought.totalBoxes === 3
+    && bought.totalBunches === 53 && !up.data.warning);
+  check('중도매인·부류 읽기', up.ok && bought.buyer === '명정원예영농조' && bought.category === '절화');
+
+  st = (await api('/api/state')).data;
+  const prow = (st.salesSummary || []).find((r) => r.label === '2026-08-24');
+  check('날짜별 매출에 매입 표시 (주문 없는 날짜도)', Boolean(prow) && prow.purchase === 231400,
+    JSON.stringify(prow));
+
+  const reup = await api('/api/purchases/upload', {
+    method: 'POST',
+    body: JSON.stringify({ filename: '거래내역(낙찰서)-다시.xlsx', data: xlsx64 }),
+  });
+  st = (await api('/api/state')).data;
+  check('같은 날짜 다시 올리면 새 파일로 교체', reup.ok && reup.data.replaced === true
+    && st.purchases.length === 1);
+
+  const notXlsx = await api('/api/purchases/upload', {
+    method: 'POST',
+    body: JSON.stringify({ filename: '사진.jpg', data: Buffer.from('엑셀 아님').toString('base64') }),
+  });
+  check('엑셀이 아니면 한국어로 알려줌', !notXlsx.ok && String(notXlsx.data.error).includes('엑셀'),
+    notXlsx.data.error);
+
+  const delRes = await api(`/api/purchases/${st.purchases[0].id}`, { method: 'DELETE' });
+  st = (await api('/api/state')).data;
+  check('잘못 올린 낙찰서 삭제', delRes.ok && st.purchases.length === 0);
+
+  // 재시작 후에도 남는지 보려고 다시 올려 둡니다.
+  await api('/api/purchases/upload', {
+    method: 'POST',
+    body: JSON.stringify({ filename: '거래내역(낙찰서).xlsx', data: xlsx64 }),
+  });
+
+  console.log('\n[8] 송장 도우미 (롯데 ALPS)');
   const before = await api('/api/alps/status');
   check('상태를 사람이 알아볼 수 있게 안내',
     typeof before.data.message === 'string' && before.data.message.length > 5,
@@ -382,19 +514,21 @@ async function main() {
     console.log(`  · 브라우저 점검 건너뜀 (${err.message})`);
   }
 
-  console.log('\n[8] 껐다 켜도 유지되는지');
+  console.log('\n[9] 껐다 켜도 유지되는지');
   appProc.kill();
   await sleep(800);
   await startApp();
   st = (await api('/api/state')).data;
   check('주문·설정 유지', st.orders.length >= 3 && st.nongra.configured === true,
     `주문 ${st.orders.length}건`);
+  check('매입(낙찰서) 기록 유지', st.purchases.length === 1
+    && st.purchases[0].totalAmount === 231400, `매입 ${st.purchases.length}건`);
   await api('/api/nongra/refresh', { method: 'POST', body: '{}' });
   const after = (await api('/api/state')).data;
   const nongraCount = after.orders.filter((o) => o.channel === 'nongra').length;
   check('중복 등록 없음', nongraCount === 2, `농라 주문 ${nongraCount}건`);
 
-  console.log('\n[9] 프로그램 스스로 점검하기 (🩺 전체 점검)');
+  console.log('\n[10] 프로그램 스스로 점검하기 (🩺 전체 점검)');
   const sc = (await api('/api/selfcheck')).data;
   check('점검 결과를 한국어로 알려준다',
     Array.isArray(sc.lines) && sc.lines.length >= 5, JSON.stringify(sc).slice(0, 120));
