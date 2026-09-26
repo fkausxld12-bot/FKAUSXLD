@@ -373,6 +373,43 @@ textarea { width: 100%; resize: vertical; }
 .ptable th.num, .ptable td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .ptable tr.sum td { font-weight: 700; border-bottom: 0; }
 
+.chip.auto { background: var(--brand-soft); color: var(--brand); font-size: 11px; }
+.auto-status .ghost { padding: 3px 9px; font-size: 12px; margin-left: 2px; }
+.auto-status .path { word-break: break-all; }
+.more-row { padding: 10px 16px 14px; text-align: center; }
+
+/* 판매 요약 · 달 합계 · 장부 받기 */
+.summary .card-sub { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.month-totals { margin: 12px 16px 14px; padding: 10px 12px; border-radius: 10px; background: var(--brand-soft); font-size: 13.5px; }
+.month-line { display: flex; flex-wrap: wrap; gap: 2px 10px; padding: 3px 0; font-variant-numeric: tabular-nums; }
+.link-btn { display: inline-block; text-decoration: none; border: 1px solid var(--line); border-radius: 10px; }
+
+/* 주문 찾기 */
+.search-row { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.search-row input { width: 100%; }
+
+/* 파일 끌어다 놓기 */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(31, 122, 90, .16);
+  border: 4px dashed var(--brand);
+  pointer-events: none;
+}
+.drop-overlay div {
+  padding: 18px 26px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--brand);
+  font-size: 20px;
+  font-weight: 700;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+}
+
 /* ------------------------------------------------------------ 기록 */
 
 .history { list-style: none; margin: 0; padding: 0; }
@@ -453,6 +490,7 @@ textarea { width: 100%; resize: vertical; }
   z-index: 20;
   max-width: calc(100% - 32px);
   text-align: center;
+  cursor: pointer;
 }
 .toast.bad { background: var(--danger); }
 

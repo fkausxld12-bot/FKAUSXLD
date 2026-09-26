@@ -63,8 +63,12 @@ function toast(message, bad) {
   el.textContent = message;
   el.className = 'toast' + (bad ? ' bad' : '');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add('hidden'), 2600);
+  // 긴 안내와 문제 알림은 끝까지 읽을 수 있게 더 오래 보여줍니다. 누르면 바로 닫힙니다.
+  const ms = Math.min(9000, Math.max(bad ? 5000 : 2600, message.length * 70));
+  toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
 }
+
+$('#toast').addEventListener('click', () => $('#toast').classList.add('hidden'));
 
 // 새 주문 알림음
 function beep() {
@@ -151,6 +155,23 @@ function renderSalesDays() {
       <div class="stock-n" style="min-width:90px">${fmt(r.amount)}<small>매출(원)</small></div>`;
     list.appendChild(li);
   }
+  renderMonthTotals();
+}
+
+// 이번 달·지난 달 합계. 낙찰서를 올리지 않은 날은 매입이 빠지므로 올린 일수를 같이 보여줍니다.
+function renderMonthTotals() {
+  const months = state.monthTotals || [];
+  const box = $('#monthTotals');
+  box.innerHTML = months.map((m) => {
+    const profit = m.amount - m.purchase;
+    const buy = m.purchaseDays
+      ? `<span>매입 ${won(m.purchase)} (낙찰서 ${m.purchaseDays}일) · 남는 돈
+          <b class="${profit >= 0 ? 'profit-plus' : 'profit-minus'}">${won(profit)}</b></span>`
+      : '';
+    return `<div class="month-line"><b>${Number(m.month.slice(5, 7))}월 합계</b>
+      <span>주문 ${fmt(m.count)}건 · 매출 ${won(m.amount)}</span>${buy}</div>`;
+  }).join('');
+  box.classList.toggle('hidden', !months.length);
 }
 
 $('#newSalesDay').addEventListener('click', () => {
@@ -182,84 +203,218 @@ $('#undoSalesDay').addEventListener('click', () => {
 
 /* ------------------------------------------------ 매입 (경매 낙찰서) */
 
-const openPurchases = new Set(); // [자세히]로 펼쳐 둔 날짜들 (3초 새로고침에도 유지)
+const openPurchases = new Set(); // [자세히]로 펼쳐 둔 낙찰서 (3초 새로고침에도 유지)
+const purchaseItems = new Map(); // 낙찰서 id → 품목 목록 (한 번 받으면 다시 받지 않음)
+const PURCHASE_PREVIEW = 7; // 평소에는 최근 일주일치만 보여줍니다
+let showAllPurchases = false;
+let lastAutoImportAt = null; // 자동으로 가져온 낙찰서 알림용
 
 function renderPurchases() {
+  renderPurchaseAuto();
   const list = $('#purchaseList');
   list.innerHTML = '';
   const purchases = state.purchases || [];
   $('#emptyPurchase').classList.toggle('hidden', purchases.length > 0);
 
-  for (const p of purchases) {
+  const shown = showAllPurchases ? purchases : purchases.slice(0, PURCHASE_PREVIEW);
+  for (const p of shown) {
     const li = document.createElement('li');
     li.className = 'item';
 
     const info = document.createElement('div');
     info.className = 'item-info';
     info.innerHTML = `
-      <div class="item-name">${labelText(p.date)} 낙찰${p.category ? ` <span class="chip">${escapeHtml(p.category)}</span>` : ''}</div>
-      <div class="item-sub">${p.date} · ${fmt(p.totalBoxes)}상자 · ${fmt(p.totalBunches)}속 · ${fmt(p.items.length)}줄${p.filename ? ` · ${escapeHtml(p.filename)}` : ''}</div>`;
+      <div class="item-name">${labelText(p.date)} 낙찰${p.category ? ` <span class="chip">${escapeHtml(p.category)}</span>` : ''}${p.source === 'auto' ? ' <span class="chip auto">📂 자동</span>' : ''}</div>
+      <div class="item-sub">${p.date} · ${fmt(p.totalBoxes)}상자 · ${fmt(p.totalBunches)}속 · ${fmt(p.itemCount)}줄${p.filename ? ` · ${escapeHtml(p.filename)}` : ''}</div>`;
 
     const total = document.createElement('div');
     total.className = 'stock-n';
     total.style.minWidth = '90px';
     total.innerHTML = `${fmt(p.totalAmount)}<small>매입(원)</small>`;
 
-    const opened = openPurchases.has(p.id);
-    const toggle = toolBtn(opened ? '접기' : '자세히', () => {
-      if (opened) openPurchases.delete(p.id);
-      else openPurchases.add(p.id);
-      renderPurchases();
-    });
+    const toggle = toolBtn(openPurchases.has(p.id) ? '접기' : '자세히', () => togglePurchase(p.id));
     const del = toolBtn('삭제', () =>
       confirm(`${p.date} 낙찰서 기록을 삭제할까요? 파일을 다시 올리면 언제든 복구됩니다.`) &&
       act(() => api(`/api/purchases/${p.id}`, { method: 'DELETE' }), '삭제했습니다.'), true);
 
     li.append(info, total, toggle, del);
     list.appendChild(li);
-
-    if (opened) {
-      const detail = document.createElement('li');
-      detail.className = 'purchase-detail';
-      detail.innerHTML = `<div class="ptable-wrap"><table class="ptable">
-        <tr><th>품목</th><th>품종</th><th>등급</th><th class="num">상자</th><th class="num">속수량</th><th class="num">단가</th><th class="num">금액</th><th>출하자</th></tr>
-        ${p.items.map((it) => `<tr>
-          <td>${escapeHtml(it.item)}</td><td>${escapeHtml(it.variety)}</td><td>${escapeHtml(it.grade)}</td>
-          <td class="num">${fmt(it.boxes)}</td><td class="num">${fmt(it.bunches)}</td>
-          <td class="num">${fmt(it.unitPrice)}</td><td class="num">${fmt(it.amount)}</td>
-          <td>${escapeHtml(it.shipper)}</td></tr>`).join('')}
-        <tr class="sum"><td>합계</td><td></td><td></td>
-          <td class="num">${fmt(p.totalBoxes)}</td><td class="num">${fmt(p.totalBunches)}</td><td></td>
-          <td class="num">${fmt(p.totalAmount)}</td><td></td></tr>
-      </table></div>`;
-      list.appendChild(detail);
-    }
+    if (openPurchases.has(p.id)) list.appendChild(purchaseDetailRow(p));
   }
+
+  const more = purchases.length - PURCHASE_PREVIEW;
+  $('#purchaseMoreRow').classList.toggle('hidden', more <= 0);
+  $('#purchaseMore').textContent = showAllPurchases ? '최근 것만 보기' : `지난 낙찰서 더 보기 (${fmt(more)}건)`;
 }
 
-$('#purchasePick').addEventListener('click', () => $('#purchaseFile').click());
+function purchaseDetailRow(p) {
+  const detail = document.createElement('li');
+  detail.className = 'purchase-detail';
+  const items = purchaseItems.get(p.id);
+  if (!items) {
+    detail.innerHTML = '<p class="hint pad-h">품목을 불러오는 중…</p>';
+    return detail;
+  }
+  detail.innerHTML = `<div class="ptable-wrap"><table class="ptable">
+    <tr><th>품목</th><th>품종</th><th>등급</th><th class="num">상자</th><th class="num">속수량</th><th class="num">단가</th><th class="num">금액</th><th>출하자</th></tr>
+    ${items.map((it) => `<tr>
+      <td>${escapeHtml(it.item)}</td><td>${escapeHtml(it.variety)}</td><td>${escapeHtml(it.grade)}</td>
+      <td class="num">${fmt(it.boxes)}</td><td class="num">${fmt(it.bunches)}</td>
+      <td class="num">${fmt(it.unitPrice)}</td><td class="num">${fmt(it.amount)}</td>
+      <td>${escapeHtml(it.shipper)}</td></tr>`).join('')}
+    <tr class="sum"><td>합계</td><td></td><td></td>
+      <td class="num">${fmt(p.totalBoxes)}</td><td class="num">${fmt(p.totalBunches)}</td><td></td>
+      <td class="num">${fmt(p.totalAmount)}</td><td></td></tr>
+  </table></div>`;
+  return detail;
+}
 
-$('#purchaseFile').addEventListener('change', async (event) => {
-  const file = event.target.files && event.target.files[0];
-  event.target.value = ''; // 같은 파일을 다시 골라도 또 올라가게
-  if (!file) return;
+async function togglePurchase(id) {
+  if (openPurchases.has(id)) {
+    openPurchases.delete(id);
+    renderPurchases();
+    return;
+  }
+  openPurchases.add(id);
+  renderPurchases(); // "불러오는 중"을 먼저 보여줍니다
+  if (purchaseItems.has(id)) return;
+  try {
+    const r = await api(`/api/purchases/${id}`);
+    purchaseItems.set(id, r.purchase.items);
+  } catch (err) {
+    openPurchases.delete(id);
+    toast(err.message, true);
+  }
+  renderPurchases();
+}
 
-  const data = await new Promise((resolve) => {
+$('#purchaseMore').addEventListener('click', () => {
+  showAllPurchases = !showAllPurchases;
+  renderPurchases();
+});
+
+// 다운로드 폴더 자동 가져오기 상태 + 새로 들어온 낙찰서 알림
+function renderPurchaseAuto() {
+  const a = state.purchaseAuto || {};
+  const el = $('#purchaseAutoStatus');
+  if (!a.enabled) {
+    el.innerHTML = '📂 <b>자동 가져오기 꺼짐</b> — 켜 두면 다운로드 폴더에 받은 낙찰서가 저절로 들어옵니다. ';
+    el.appendChild(toolBtn('켜기', () => setPurchaseAuto(true)));
+  } else if (!a.found) {
+    el.innerHTML = '📂 다운로드 폴더를 찾지 못해 자동으로 가져올 수 없습니다. '
+      + '[📥 낙찰서 엑셀 올리기]를 누르거나 파일을 이 화면에 끌어다 놓아 주세요.';
+  } else {
+    el.innerHTML = '📂 <b>자동 가져오기 켜짐</b> — 공판장에서 낙찰서를 받기만 하면 몇 초 안에 저절로 들어옵니다. '
+      + `<span class="path">(${escapeHtml(a.dir)})</span> `;
+    el.appendChild(toolBtn('끄기', () => setPurchaseAuto(false)));
+  }
+  if (a.error) el.insertAdjacentHTML('beforeend', ` <b class="profit-minus">⚠ ${escapeHtml(a.error)}</b>`);
+
+  const imports = a.imports || [];
+  const latestAt = imports.length ? imports[0].at : '';
+  if (lastAutoImportAt !== null && latestAt && latestAt !== lastAutoImportAt) {
+    const fresh = imports.filter((i) => i.at > lastAutoImportAt);
+    const warn = fresh.find((i) => i.warning);
+    toast(`📥 낙찰서를 자동으로 가져왔습니다: ${fresh.map((i) => `${labelText(i.date)} 매입 ${won(i.totalAmount)}`).join(', ')}`
+      + (warn ? ` ⚠ ${warn.warning}` : ''), Boolean(warn));
+  }
+  lastAutoImportAt = latestAt;
+}
+
+function setPurchaseAuto(enabled) {
+  act(
+    () => api('/api/purchases/auto', { method: 'POST', body: JSON.stringify({ enabled }) }),
+    (r) => {
+      if (!enabled) return '자동 가져오기를 껐습니다. 낙찰서는 직접 올려 주세요.';
+      return r.imported.length
+        ? `자동 가져오기를 켰습니다. 다운로드 폴더의 낙찰서 ${r.imported.length}개를 바로 가져왔습니다.`
+        : '자동 가져오기를 켰습니다.';
+    },
+  );
+}
+
+function readAsBase64(file) {
+  return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
     reader.onerror = () => resolve('');
     reader.readAsDataURL(file);
   });
-  if (!data) return toast('파일을 읽지 못했습니다. 다시 골라 주세요.', true);
+}
 
-  await act(
-    () => api('/api/purchases/upload', { method: 'POST', body: JSON.stringify({ filename: file.name, data }) }),
-    (r) => {
-      const p = r.purchase;
-      const base = `${p.date} 매입 ${won(p.totalAmount)} (${p.items.length}줄) 기록했습니다.${r.replaced ? ' 같은 날짜라 새 파일로 바꿨습니다.' : ''}`;
-      return r.warning ? `${base} ⚠ ${r.warning}` : base;
-    },
-  );
+// 낙찰서 여러 개를 차례로 올립니다. (파일 고르기 · 끌어다 놓기 공통)
+async function uploadPurchaseFiles(fileList) {
+  const files = Array.from(fileList || []).filter((f) => /\.xlsx$/i.test(f.name));
+  if (!files.length) {
+    toast('낙찰서 엑셀(.xlsx) 파일만 올릴 수 있습니다.', true);
+    return;
+  }
+  const done = [];
+  const failed = [];
+  for (const file of files) {
+    try {
+      const data = await readAsBase64(file);
+      if (!data) throw new Error('파일을 읽지 못했습니다.');
+      done.push(await api('/api/purchases/upload', { method: 'POST', body: JSON.stringify({ filename: file.name, data }) }));
+    } catch (err) {
+      failed.push(`${file.name}: ${err.message}`);
+    }
+  }
+  await refresh();
+
+  const warnings = done.filter((r) => r.warning).map((r) => `${labelText(r.purchase.date)} ${r.warning}`);
+  if (done.length === 1 && !failed.length) {
+    const r = done[0];
+    const p = r.purchase;
+    toast(`${p.date} 매입 ${won(p.totalAmount)} (${p.items.length}줄) 기록했습니다.`
+      + `${r.replaced ? ' 같은 날짜라 새 파일로 바꿨습니다.' : ''}${r.warning ? ` ⚠ ${r.warning}` : ''}`, Boolean(r.warning));
+    return;
+  }
+  const parts = [];
+  if (done.length) parts.push(`낙찰서 ${done.length}개 기록했습니다 (${done.map((r) => labelText(r.purchase.date)).join(', ')}).`);
+  if (warnings.length) parts.push(`⚠ ${warnings.join(' / ')}`);
+  if (failed.length) parts.push(`못 올린 파일: ${failed.join(' / ')}`);
+  toast(parts.join(' '), failed.length > 0 || warnings.length > 0);
+}
+
+$('#purchasePick').addEventListener('click', () => $('#purchaseFile').click());
+
+$('#purchaseFile').addEventListener('change', (event) => {
+  const files = Array.from(event.target.files || []);
+  event.target.value = ''; // 같은 파일을 다시 골라도 또 올라가게
+  if (files.length) uploadPurchaseFiles(files);
+});
+
+// 파일을 화면 어디에 끌어다 놓아도 낙찰서로 올립니다.
+// (이걸 막지 않으면 브라우저가 파일을 열어 버려 프로그램 화면이 사라집니다)
+// 안내 막은 dragover가 계속 오는 동안만 보입니다. 화면이 3초마다 새로 그려져 dragleave가
+// 빠질 수 있어서, 들어오고 나간 횟수를 세지 않고 dragover가 멈추면 스스로 닫히게 했습니다.
+let dropHideTimer = null;
+const dragHasFiles = (e) => Boolean(e.dataTransfer) && Array.from(e.dataTransfer.types || []).includes('Files');
+
+function showDropOverlay() {
+  $('#dropOverlay').classList.remove('hidden');
+  clearTimeout(dropHideTimer);
+  dropHideTimer = setTimeout(() => $('#dropOverlay').classList.add('hidden'), 700);
+}
+
+document.addEventListener('dragenter', (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault();
+  showDropOverlay();
+});
+document.addEventListener('dragover', (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  showDropOverlay();
+});
+document.addEventListener('drop', (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault();
+  clearTimeout(dropHideTimer);
+  $('#dropOverlay').classList.add('hidden');
+  uploadPurchaseFiles(e.dataTransfer.files);
 });
 
 function renderStoreStatus() {
@@ -325,6 +480,14 @@ function renderSummary() {
   $('#cntStore').textContent = fmt(newStore);
   $('#cntToday').textContent = fmt(cur.count);
   $('#sumToday').textContent = fmt(cur.amount);
+
+  // 이번 장 낙찰서가 들어와 있으면 남는 돈을 카드에서 바로 보여줍니다.
+  const profitEl = $('#profitToday');
+  if (cur.purchase != null) {
+    const profit = cur.amount - cur.purchase;
+    profitEl.innerHTML = `매입 ${fmt(cur.purchase)} · 남는 돈 <b class="${profit >= 0 ? 'profit-plus' : 'profit-minus'}">${fmt(profit)}</b>`;
+  }
+  profitEl.classList.toggle('hidden', cur.purchase == null);
 
   // 새 주문이 늘어나면 알림음과 함께 알려줍니다.
   const newCount = newNongra + newStore;
@@ -400,12 +563,25 @@ function orderMatchesFilter(order, filter) {
   }
 }
 
+// 찾기용: 띄어쓰기·하이픈을 빼고 비교해서 "010 1234" 도 "010-1234-..." 를 찾습니다.
+const searchKey = (s) => String(s || '').toLowerCase().replace(/[\s-]/g, '');
+
+function orderSearchText(o) {
+  return searchKey([o.buyer, o.phone, o.address, o.memo, `#${o.no}`, ...o.items.map((it) => it.name)].join(' '));
+}
+
 function renderOrders() {
   const filter = $('#orderFilter').value;
   const list = $('#orderList');
   list.innerHTML = '';
-  const visible = state.orders.filter((o) => orderMatchesFilter(o, filter));
+  // 찾을 때는 완료·취소된 주문까지 전부에서 찾습니다. (손님 전화로 "제 주문 어떻게 됐어요?" 할 때)
+  const q = searchKey($('#orderSearch').value);
+  const visible = q
+    ? state.orders.filter((o) => orderSearchText(o).includes(q))
+    : state.orders.filter((o) => orderMatchesFilter(o, filter));
   $('#emptyOrders').classList.toggle('hidden', visible.length > 0);
+  $('#orderSearchHint').textContent = q ? `전체 주문에서 ${fmt(visible.length)}건 찾았습니다.` : '';
+  $('#orderSearchHint').classList.toggle('hidden', !q);
 
   for (const order of visible.slice(0, 100)) {
     const li = document.createElement('li');
@@ -980,6 +1156,7 @@ $('#orderForm').addEventListener('submit', async (e) => {
 });
 
 $('#orderFilter').addEventListener('change', renderOrders);
+$('#orderSearch').addEventListener('input', renderOrders);
 
 $('#selfCheck').addEventListener('click', async () => {
   const btn = $('#selfCheck');

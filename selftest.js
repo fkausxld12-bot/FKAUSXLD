@@ -21,6 +21,7 @@ const ALPS_SHELL_PORT = 4713;
 const ALPS_FORM_PORT = 4714;
 const CDP_PORT = 9711;
 const DATA_DIR = path.join(os.tmpdir(), 'flower-selftest-' + process.pid);
+const DL_DIR = path.join(os.tmpdir(), 'flower-selftest-dl-' + process.pid); // 가짜 다운로드 폴더
 
 let pass = 0;
 let fail = 0;
@@ -260,7 +261,7 @@ function zipStore(files) { // [[이름, 내용]] → 압축 없이 담은 zip Bu
   return Buffer.concat([...parts, centralBuf, eocd]);
 }
 
-function buildAuctionXlsx() {
+function buildAuctionXlsx(date = '2026-08-24') {
   const inline = (ref, text) => `<c r="${ref}" t="inlineStr"><is><t>${text}</t></is></c>`;
   const numCell = (ref, n) => `<c r="${ref}" t="n"><v>${n}</v></c>`;
   const sheet = `<?xml version="1.0" encoding="UTF-8"?>
@@ -268,7 +269,7 @@ function buildAuctionXlsx() {
 <row r="2">${inline('A2', '&#44144;&#47000;&#45236;&#50669;(&#45209;&#52272;&#49436;)')}</row>
 <row r="6">${inline('A6', '&#51473;&#46020;&#47588;&#51064;')}<c r="B6" t="s"><v>0</v></c></row>
 <row r="7">${inline('A7', '화훼부류')}${inline('B7', '절화')}</row>
-<row r="8">${inline('A8', '&#44221;&#47588;&#51068;&#51088;')}${inline('B8', '2026-08-24')}</row>
+<row r="8">${inline('A8', '&#44221;&#47588;&#51068;&#51088;')}${inline('B8', date)}</row>
 <row r="11">${inline('A11', '&#54408;&#47785;&#47749;')}${inline('B11', '품종명')}${inline('C11', '등급')}${inline('D11', '상자수')}${inline('E11', '속수량')}${inline('F11', '단가')}${inline('G11', '매입금액')}${inline('H11', '상장번호')}${inline('I11', '출하자')}</row>
 <row r="12">${inline('A12', '&#44397;&#54868;')}${inline('B12', '설국')}${inline('C12', '특3')}${numCell('D12', '1.0')}${numCell('E12', '40.0')}${numCell('F12', '2340.0')}${numCell('G12', '93600.0')}${inline('H12', 'B0084-01')}${inline('I12', '김왕규')}</row>
 <row r="13">${inline('A13', '장미')}${inline('B13', '스프레이')}${inline('C13', '특3')}${numCell('D13', '2.0')}${numCell('E13', '13.0')}${numCell('F13', '10600.0')}${numCell('G13', '137800.0')}${inline('H13', 'A0758-01')}${inline('I13', '로즈피아')}</row>
@@ -291,12 +292,17 @@ function buildAuctionXlsx() {
 let appProc = null;
 
 async function startApp(fresh) {
-  if (fresh) fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  if (fresh) {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    fs.rmSync(DL_DIR, { recursive: true, force: true });
+    fs.mkdirSync(DL_DIR, { recursive: true });
+  }
   appProc = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
     env: {
       ...process.env,
       PORT: String(APP_PORT),
       DATA_DIR,
+      DOWNLOADS_DIR: DL_DIR,
       ALPS_PORT: String(CDP_PORT),
       ALPS_SITE_RE: `localhost:${ALPS_SHELL_PORT}|127\\.0\\.0\\.1:${ALPS_FORM_PORT}`,
       ALPS_LOGIN_URL: `http://localhost:${ALPS_SHELL_PORT}/`,
@@ -461,7 +467,49 @@ async function main() {
     body: JSON.stringify({ filename: '거래내역(낙찰서).xlsx', data: xlsx64 }),
   });
 
-  console.log('\n[8] 송장 도우미 (롯데 ALPS)');
+  console.log('\n[8] 낙찰서 자동 가져오기 · 장부 엑셀');
+  // 공판장에서 받은 것처럼 다운로드 폴더에 넣습니다. (받은 지 1분 된 파일로)
+  const putDownload = (name, buf) => {
+    const file = path.join(DL_DIR, name);
+    fs.writeFileSync(file, buf);
+    const t = new Date(Date.now() - 60000);
+    fs.utimesSync(file, t, t);
+  };
+  putDownload('거래내역낙찰서20260824.xlsx', buildAuctionXlsx('2026-08-24')); // 이미 올린 것과 같은 내용
+  putDownload('거래내역낙찰서20260825.xlsx', buildAuctionXlsx('2026-08-25'));
+  putDownload('은행거래내역.xlsx', buildAuctionXlsx('2026-08-20')); // 낙찰서가 아닌 파일
+  const scan = await api('/api/purchases/auto', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+  const got = (scan.data.imported || []).map((i) => i.date);
+  check('다운로드 폴더의 낙찰서 자동 등록', scan.ok && got.includes('2026-08-25'), got.join(','));
+  check('같은 내용·낙찰서 아닌 파일은 건너뜀', got.length === 1, got.join(','));
+
+  st = (await api('/api/state')).data;
+  const auto825 = st.purchases.find((p) => p.date === '2026-08-25');
+  const detail825 = auto825 && await api(`/api/purchases/${auto825.id}`);
+  check('목록은 가볍게, 품목은 [자세히] 때 따로',
+    Boolean(auto825) && !('items' in auto825) && auto825.itemCount === 2 && auto825.source === 'auto'
+    && detail825.ok && detail825.data.purchase.items.length === 2);
+
+  await api(`/api/purchases/${auto825.id}`, { method: 'DELETE' });
+  const rescan = await api('/api/purchases/auto', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+  check('지운 낙찰서는 다시 들어오지 않음', rescan.ok && rescan.data.imported.length === 0);
+
+  await api('/api/purchases/auto', { method: 'POST', body: JSON.stringify({ enabled: false }) });
+  putDownload('거래내역낙찰서20260826.xlsx', buildAuctionXlsx('2026-08-26')); // 꺼져 있는 동안 받은 파일
+
+  st = (await api('/api/state')).data;
+  const aug = (st.monthTotals || []).find((m) => m.month === '2026-08');
+  check('달 합계에 매입 반영', Boolean(aug) && aug.purchase === 231400 && aug.purchaseDays === 1,
+    JSON.stringify(aug));
+  const ledger = await fetch(`http://127.0.0.1:${APP_PORT}/api/export/sales.csv`);
+  const ledgerBytes = Buffer.from(await ledger.arrayBuffer()); // .text()는 BOM을 떼어 버리므로 바이트로 확인
+  const ledgerText = ledgerBytes.toString('utf8');
+  check('장부 엑셀(CSV) 내려받기',
+    ledger.ok && ledgerBytes.subarray(0, 3).equals(Buffer.from([0xEF, 0xBB, 0xBF])) && ledgerText.includes('"매입(원)"')
+    && ledgerText.includes('"2026-08-24"') && ledgerText.includes('"231400"') && ledgerText.includes('"2026-08 합계"'),
+    ledgerText.slice(0, 160));
+
+  console.log('\n[9] 송장 도우미 (롯데 ALPS)');
   const before = await api('/api/alps/status');
   check('상태를 사람이 알아볼 수 있게 안내',
     typeof before.data.message === 'string' && before.data.message.length > 5,
@@ -514,7 +562,7 @@ async function main() {
     console.log(`  · 브라우저 점검 건너뜀 (${err.message})`);
   }
 
-  console.log('\n[9] 껐다 켜도 유지되는지');
+  console.log('\n[10] 껐다 켜도 유지되는지');
   appProc.kill();
   await sleep(800);
   await startApp();
@@ -523,12 +571,20 @@ async function main() {
     `주문 ${st.orders.length}건`);
   check('매입(낙찰서) 기록 유지', st.purchases.length === 1
     && st.purchases[0].totalAmount === 231400, `매입 ${st.purchases.length}건`);
+  await sleep(3500); // 켜고 3초 뒤 첫 확인이 지나가도록
+  st = (await api('/api/state')).data;
+  check('자동 가져오기를 끄면 그대로 꺼져 있음',
+    st.purchaseAuto.enabled === false && !st.purchases.some((p) => p.date === '2026-08-26'));
+  const reon = await api('/api/purchases/auto', { method: 'POST', body: JSON.stringify({ enabled: true }) });
+  const reonDates = (reon.data.imported || []).map((i) => i.date);
+  check('다시 켜면 꺼져 있던 동안 받은 낙찰서만 가져옴 (지운 것은 기억)',
+    reonDates.length === 1 && reonDates[0] === '2026-08-26', reonDates.join(','));
   await api('/api/nongra/refresh', { method: 'POST', body: '{}' });
   const after = (await api('/api/state')).data;
   const nongraCount = after.orders.filter((o) => o.channel === 'nongra').length;
   check('중복 등록 없음', nongraCount === 2, `농라 주문 ${nongraCount}건`);
 
-  console.log('\n[10] 프로그램 스스로 점검하기 (🩺 전체 점검)');
+  console.log('\n[11] 프로그램 스스로 점검하기 (🩺 전체 점검)');
   const sc = (await api('/api/selfcheck')).data;
   check('점검 결과를 한국어로 알려준다',
     Array.isArray(sc.lines) && sc.lines.length >= 5, JSON.stringify(sc).slice(0, 120));
@@ -555,6 +611,7 @@ async function main() {
   alpsShell.close();
   alpsForm.close();
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  fs.rmSync(DL_DIR, { recursive: true, force: true });
   process.exit(fail === 0 ? 0 : 1);
 }
 

@@ -20,7 +20,7 @@
     <div class="card"><span class="label">농라 신규</span><strong id="cntNongra">0</strong><span class="unit">건</span></div>
     <div class="card"><span class="label">스토어 신규</span><strong id="cntStore">0</strong><span class="unit">건</span></div>
     <div class="card"><span class="label" id="labelCntToday">이번 장 주문</span><strong id="cntToday">0</strong><span class="unit">건</span></div>
-    <div class="card money"><span class="label" id="labelSumToday">이번 장 매출</span><strong id="sumToday">0</strong><span class="unit">원</span></div>
+    <div class="card money"><span class="label" id="labelSumToday">이번 장 매출</span><strong id="sumToday">0</strong><span class="unit">원</span><span class="card-sub hidden" id="profitToday"></span></div>
   </section>
 
   <!-- 날짜별 매출 -->
@@ -30,6 +30,7 @@
       <div class="row-gap">
         <button type="button" class="primary" id="newSalesDay">🆕 새 판매일 시작</button>
         <button type="button" class="ghost" id="undoSalesDay">되돌리기</button>
+        <a class="ghost link-btn" href="/api/export/sales.csv" download title="날짜별 매출·매입·남는 돈을 엑셀로 받습니다">📊 장부 엑셀</a>
       </div>
     </div>
     <p class="hint pad-h">농라F에 새 판매글이 올라오면 자동으로 다음 날짜 매출로 넘어갑니다.
@@ -39,6 +40,7 @@
     <p class="hint pad-h hidden" id="salesDayBounds"></p>
     <ul class="items" id="salesDayList"></ul>
     <p class="empty hidden" id="emptySalesDay">주문이 들어오면 날짜별 매출이 자동으로 집계됩니다.</p>
+    <div class="month-totals hidden" id="monthTotals"></div>
   </section>
 
   <!-- 매입 내역 (경매 낙찰서) -->
@@ -47,14 +49,17 @@
       <h2>매입 내역 (경매 낙찰서)</h2>
       <div class="row-gap">
         <button type="button" class="primary" id="purchasePick">📥 낙찰서 엑셀 올리기</button>
-        <input type="file" id="purchaseFile" accept=".xlsx" class="hidden" />
+        <input type="file" id="purchaseFile" accept=".xlsx" multiple class="hidden" />
       </div>
     </div>
-    <p class="hint pad-h">공판장에서 내려받은 <b>거래내역(낙찰서) 엑셀</b>을 올리면
-      그날 산 꽃과 매입금액이 자동으로 기록되고, 위 <b>날짜별 매출</b>에 남는 돈이 함께 나옵니다.
-      같은 날짜를 다시 올리면 새 파일 내용으로 바뀌고, 잘못 올렸으면 [삭제] 후 다시 올리면 됩니다.</p>
+    <p class="hint pad-h auto-status" id="purchaseAutoStatus"></p>
+    <p class="hint pad-h">공판장에서 내려받은 <b>거래내역(낙찰서) 엑셀</b>이 들어오면
+      그날 산 꽃과 매입금액이 기록되고, 위 <b>날짜별 매출</b>에 남는 돈이 함께 나옵니다.
+      직접 올릴 때는 버튼 대신 파일을 이 화면에 <b>끌어다 놓아도</b> 되고, 여러 개를 한 번에 올려도 됩니다.
+      같은 날짜를 다시 올리면 새 파일 내용으로 바뀌고, 잘못 들어왔으면 [삭제]하면 됩니다.</p>
     <ul class="items" id="purchaseList"></ul>
-    <p class="empty hidden" id="emptyPurchase">아직 올린 낙찰서가 없습니다.</p>
+    <p class="empty hidden" id="emptyPurchase">아직 들어온 낙찰서가 없습니다.</p>
+    <div class="more-row hidden" id="purchaseMoreRow"><button type="button" class="ghost" id="purchaseMore"></button></div>
   </section>
 
   <!-- 농라F 연동 -->
@@ -194,6 +199,11 @@
       </div>
     </div>
 
+    <div class="search-row">
+      <input type="search" id="orderSearch" placeholder="🔍 이름 · 전화번호 · 품목으로 찾기" autocomplete="off" />
+    </div>
+    <p class="hint pad-h hidden" id="orderSearchHint"></p>
+
     <form class="order-form hidden" id="orderForm">
       <p class="hint">스토어 자동 연동으로 안 들어온 주문만 여기로 등록하세요.
         문자 주문은 위 <b>현장 판매</b>에서 [📱 문자 주문 등록]을 쓰면 편합니다.</p>
@@ -222,7 +232,8 @@
   </footer>
 </main>
 
-<div class="toast hidden" id="toast"></div>
+<div class="toast hidden" id="toast" title="누르면 닫힙니다"></div>
+<div class="drop-overlay hidden" id="dropOverlay"><div>📥 낙찰서 엑셀을 여기에 놓으세요</div></div>
 <script src="/app.js"></script>
 </body>
 </html>

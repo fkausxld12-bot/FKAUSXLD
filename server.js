@@ -18,7 +18,7 @@ const os = require('os');
 const zlib = require('zlib');
 const alps = require('./alps');
 
-const APP_VERSION = 'v30'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
+const APP_VERSION = 'v31'; // 화면에 표시되어 어떤 버전인지 바로 알 수 있습니다.
 
 const PORT = Number(process.env.PORT) || 4000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -77,7 +77,12 @@ const emptyDb = () => ({
   // 판매일(장) 경계: 새 발송글 기준으로 매출 날짜를 나눕니다.
   salesDays: [], // [{ id, at, label: 'YYYY-MM-DD' }]
   // 경매 매입 내역: 공판장 거래내역(낙찰서) 엑셀을 올리면 날짜별로 기록됩니다.
-  purchases: [], // [{ id, date, buyer, category, filename, uploadedAt, items, totalAmount, totalBoxes, totalBunches }]
+  purchases: [], // [{ id, date, buyer, category, filename, source, uploadedAt, items, totalAmount, totalBoxes, totalBunches }]
+  // 다운로드 폴더에 받은 낙찰서를 저절로 가져오기
+  purchaseAuto: {
+    enabled: true,
+    seen: {}, // 이미 본 파일 '이름|크기|수정시각' → 본 시각 (기록을 지워도 다시 들어오지 않게)
+  },
   // 송장(ALPS) 등록 기록: 주문 id → { at, orderNo } (이중 발행 방지)
   invoices: {},
   // 문자 주문 안내 문구 설정
@@ -105,6 +110,12 @@ function loadDb() {
       orderSeq: Number(raw.orderSeq) || 0,
       salesDays: Array.isArray(raw.salesDays) ? raw.salesDays : [],
       purchases: Array.isArray(raw.purchases) ? raw.purchases : [],
+      purchaseAuto: {
+        ...base.purchaseAuto,
+        ...(raw.purchaseAuto || {}),
+        seen: raw.purchaseAuto && raw.purchaseAuto.seen && typeof raw.purchaseAuto.seen === 'object'
+          ? raw.purchaseAuto.seen : {},
+      },
       smsInfo: { account: (raw.smsInfo && raw.smsInfo.account) || base.smsInfo.account },
       invoices: raw.invoices && typeof raw.invoices === 'object' ? raw.invoices : {},
       nongra: {
@@ -315,8 +326,8 @@ function currentSalesLabel() {
     : dateLabel(new Date());
 }
 
-// 판매일별 주문 건수·수량·매출(배송비 제외 물품 금액) 집계
-function salesSummary() {
+// 판매일별 주문 건수·수량·매출(배송비 제외 물품 금액)과 그날 매입 — 전체 기간, 최근 날짜부터
+function dailyRows() {
   const map = new Map();
   for (const o of db.orders) {
     if (o.status === 'canceled') continue;
@@ -335,7 +346,26 @@ function salesSummary() {
     row.purchase = (row.purchase || 0) + p.totalAmount;
     map.set(p.date, row);
   }
-  return [...map.values()].sort((a, b) => b.label.localeCompare(a.label)).slice(0, 14);
+  return [...map.values()].sort((a, b) => b.label.localeCompare(a.label));
+}
+
+// 달마다 합계 (자료가 있는 최근 두 달). 매입은 낙찰서를 올린 날만 들어가므로 그 일수도 함께 셉니다.
+function monthTotals(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(r.label)) continue;
+    const month = r.label.slice(0, 7);
+    const m = map.get(month) || { month, count: 0, qty: 0, amount: 0, purchase: 0, purchaseDays: 0 };
+    m.count += r.count;
+    m.qty += r.qty;
+    m.amount += r.amount;
+    if (r.purchase != null) {
+      m.purchase += r.purchase;
+      m.purchaseDays += 1;
+    }
+    map.set(month, m);
+  }
+  return [...map.values()].sort((a, b) => b.month.localeCompare(a.month)).slice(0, 2);
 }
 
 /* ------------------------------------------------- 매입 (경매 낙찰서 엑셀) */
@@ -568,37 +598,189 @@ function parseAuctionSheet(cells) {
   return { date, buyer, category, items, totalAmount, totalBoxes, totalBunches, warning };
 }
 
+const PURCHASE_KEEP = 400; // 낙찰서 보관 개수 (매일 올려도 1년 넘게 남습니다)
+
+// 해석한 낙찰서를 매입 기록으로 저장합니다. 같은 경매일자가 있으면 새 내용으로 바꿉니다.
+function storePurchase(parsed, filename, source) {
+  const replaced = db.purchases.some((p) => p.date === parsed.date);
+  const record = {
+    id: nextId(),
+    date: parsed.date,
+    buyer: parsed.buyer,
+    category: parsed.category,
+    items: parsed.items,
+    totalAmount: parsed.totalAmount,
+    totalBoxes: parsed.totalBoxes,
+    totalBunches: parsed.totalBunches,
+    filename: String(filename || '').slice(0, 120),
+    source, // 'upload' = 직접 올림, 'auto' = 다운로드 폴더에서 자동으로
+    uploadedAt: new Date().toISOString(),
+  };
+  db.purchases = db.purchases.filter((p) => p.date !== parsed.date);
+  db.purchases.push(record);
+  db.purchases.sort((a, b) => b.date.localeCompare(a.date));
+  if (db.purchases.length > PURCHASE_KEEP) db.purchases.length = PURCHASE_KEEP;
+
+  logHistory('purchase',
+    `${source === 'auto' ? '낙찰서 자동 등록' : '낙찰서 등록'}: ${record.date} 매입 ${record.totalAmount.toLocaleString('ko-KR')}원 (${record.items.length}줄)`
+    + (replaced ? ' — 같은 날짜를 새 파일로 바꿈' : ''));
+  return { record, replaced };
+}
+
+// 화면에는 3초마다 목록만 보냅니다. 품목별 상세는 [자세히]를 누를 때 따로 받아 갑니다.
+function purchaseSummary(p) {
+  const { items, ...rest } = p;
+  return { ...rest, itemCount: items.length };
+}
+
+/* ------------------------------------------- 낙찰서 자동 가져오기 (다운로드 폴더) */
+
+const PURCHASE_SCAN_MS = 10 * 1000; // 10초마다 확인
+const PURCHASE_SCAN_DAYS = 14; // 최근 2주 안에 받은 파일만 봅니다
+
+function downloadsDir() {
+  const candidates = process.env.DOWNLOADS_DIR
+    ? [process.env.DOWNLOADS_DIR]
+    : [path.join(os.homedir(), 'Downloads'), path.join(os.homedir(), '다운로드')];
+  for (const dir of candidates) {
+    try {
+      if (fs.statSync(dir).isDirectory()) return dir;
+    } catch {
+      /* 없는 폴더 */
+    }
+  }
+  return '';
+}
+
+const purchaseScan = { dir: downloadsDir(), lastScanAt: '', error: '', imports: [] };
+
+/**
+ * 다운로드 폴더에서 새 낙찰서를 찾아 매입 기록에 넣습니다.
+ *  - 이름에 '낙찰'이 들어간 .xlsx만 엽니다. 다른 파일은 건드리지 않습니다.
+ *  - 한 번 본 파일은 기억해 두어, 화면에서 기록을 지워도 다시 들어오지 않습니다.
+ *  - 이미 같은 내용이 올라가 있으면 조용히 넘어갑니다.
+ */
+function scanDownloads() {
+  const auto = db.purchaseAuto;
+  const dir = downloadsDir();
+  purchaseScan.dir = dir;
+  if (!auto.enabled || !dir) return [];
+
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+    purchaseScan.error = '';
+  } catch {
+    purchaseScan.error = '다운로드 폴더를 읽지 못했습니다.';
+    return [];
+  }
+
+  const now = Date.now();
+  const files = [];
+  for (const name of names) {
+    const nice = name.normalize('NFC'); // 맥은 한글 파일 이름을 풀어서 저장합니다.
+    if (!/\.xlsx$/i.test(nice) || !nice.includes('낙찰')) continue;
+    let st;
+    try {
+      st = fs.statSync(path.join(dir, name));
+    } catch {
+      continue;
+    }
+    const age = now - st.mtimeMs;
+    // 너무 오래된 파일, 아직 받는 중(방금 바뀐)인 파일은 건너뜁니다.
+    if (!st.isFile() || !st.size || age > PURCHASE_SCAN_DAYS * 86400000 || age < 2000) continue;
+    files.push({ name, nice, mtime: st.mtimeMs, key: `${nice}|${st.size}|${Math.round(st.mtimeMs)}` });
+  }
+  files.sort((a, b) => a.mtime - b.mtime); // 같은 날짜 파일이 여럿이면 나중에 받은 것이 남도록
+
+  const seen = {};
+  const imported = [];
+  for (const f of files) {
+    if (auto.seen[f.key]) {
+      seen[f.key] = auto.seen[f.key];
+      continue;
+    }
+    seen[f.key] = new Date().toISOString();
+    let parsed;
+    try {
+      parsed = parseAuctionXlsx(fs.readFileSync(path.join(dir, f.name)));
+    } catch {
+      continue; // 낙찰서가 아니거나 깨진 파일 — 다시 받으면(크기·시각이 바뀌면) 다시 봅니다.
+    }
+    const same = db.purchases.find((p) => p.date === parsed.date);
+    if (same && JSON.stringify(same.items) === JSON.stringify(parsed.items)) continue;
+    const { record, replaced } = storePurchase(parsed, f.nice, 'auto');
+    imported.push({
+      at: record.uploadedAt,
+      date: record.date,
+      totalAmount: record.totalAmount,
+      filename: record.filename,
+      replaced,
+      warning: parsed.warning || '',
+    });
+  }
+
+  const changed = imported.length > 0
+    || Object.keys(seen).length !== Object.keys(auto.seen).length
+    || Object.keys(seen).some((k) => !auto.seen[k]);
+  auto.seen = seen;
+  purchaseScan.lastScanAt = new Date().toISOString();
+  if (imported.length) purchaseScan.imports = [...imported.reverse(), ...purchaseScan.imports].slice(0, 5);
+  if (changed) save();
+  return imported;
+}
+
+function purchaseAutoPublic() {
+  return {
+    enabled: db.purchaseAuto.enabled,
+    dir: purchaseScan.dir,
+    found: Boolean(purchaseScan.dir),
+    lastScanAt: purchaseScan.lastScanAt,
+    error: purchaseScan.error,
+    imports: purchaseScan.imports, // 최근 자동으로 가져온 것 (화면 알림용)
+  };
+}
+
+setInterval(() => scanDownloads(), PURCHASE_SCAN_MS);
+setTimeout(() => scanDownloads(), 3000); // 프로그램을 켜고 3초 뒤 첫 확인
+
 /* ---------------------------------------------------------------- 라우팅 */
 
 const routes = {
-  'GET /api/state': () => ({
-    products: db.products,
-    orders: db.orders,
-    history: db.history,
-    nongra: {
-      ...nongraPublic(), // 비밀번호는 내보내지 않습니다.
-      unprocessed: nongraUnprocessedCount(),
-      secretCount: nongraCache.inbox.filter((p) => p.secret && !db.nongra.processed[postKeyOf(p)]).length,
-      fetchedAt: nongraCache.fetchedAt,
-      error: nongraCache.error,
-      loggedIn: nongraCache.loggedIn,
-      sales: nongraCache.sales, // 판매 페이지 상품·재고·판매 현황
-      orderedTotal: nongraCache.sales.products.reduce((s, p) => s + p.sold + p.progress, 0),
-      // 판매글 수정 페이지 바로가기 (현장판매 후 재고를 손으로 줄일 때)
-      editUrl: db.nongra.editUrlOverride || (db.nongra.wrId && db.nongra.base && !db.nongra.short
-        ? `${db.nongra.base}/bbs/write.php?w=u&bo_table=${encodeURIComponent(db.nongra.boTable)}&wr_id=${db.nongra.wrId}&page=`
-        : ''),
-    },
-    store: storePublic(),
-    smsAccount: db.smsInfo.account,
-    invoices: db.invoices,
-    salesDays: db.salesDays.slice(-5),
-    purchases: db.purchases,
-    currentLabel: currentSalesLabel(),
-    salesSummary: salesSummary(),
-    version: APP_VERSION,
-    updatedAt: db.updatedAt,
-  }),
+  'GET /api/state': () => {
+    const rows = dailyRows();
+    return {
+      products: db.products,
+      orders: db.orders,
+      history: db.history,
+      nongra: {
+        ...nongraPublic(), // 비밀번호는 내보내지 않습니다.
+        unprocessed: nongraUnprocessedCount(),
+        secretCount: nongraCache.inbox.filter((p) => p.secret && !db.nongra.processed[postKeyOf(p)]).length,
+        fetchedAt: nongraCache.fetchedAt,
+        error: nongraCache.error,
+        loggedIn: nongraCache.loggedIn,
+        sales: nongraCache.sales, // 판매 페이지 상품·재고·판매 현황
+        orderedTotal: nongraCache.sales.products.reduce((s, p) => s + p.sold + p.progress, 0),
+        // 판매글 수정 페이지 바로가기 (현장판매 후 재고를 손으로 줄일 때)
+        editUrl: db.nongra.editUrlOverride || (db.nongra.wrId && db.nongra.base && !db.nongra.short
+          ? `${db.nongra.base}/bbs/write.php?w=u&bo_table=${encodeURIComponent(db.nongra.boTable)}&wr_id=${db.nongra.wrId}&page=`
+          : ''),
+      },
+      store: storePublic(),
+      smsAccount: db.smsInfo.account,
+      invoices: db.invoices,
+      salesDays: db.salesDays.slice(-5),
+      purchases: db.purchases.slice(0, 60).map(purchaseSummary),
+      purchaseCount: db.purchases.length,
+      purchaseAuto: purchaseAutoPublic(),
+      currentLabel: currentSalesLabel(),
+      salesSummary: rows.slice(0, 14),
+      monthTotals: monthTotals(rows),
+      version: APP_VERSION,
+      updatedAt: db.updatedAt,
+    };
+  },
 
   // 새 판매일 시작 (새 발송글을 올린 직후) - 시작 시각을 직접 지정할 수 있습니다.
   'POST /api/salesday': (body) => {
@@ -625,29 +807,24 @@ const routes = {
     if (!buf.length) throw httpError(400, '파일 내용을 읽지 못했습니다. 다시 올려 주세요.');
 
     const parsed = parseAuctionXlsx(buf);
-    const replaced = db.purchases.some((p) => p.date === parsed.date);
-    const record = {
-      id: nextId(),
-      date: parsed.date,
-      buyer: parsed.buyer,
-      category: parsed.category,
-      items: parsed.items,
-      totalAmount: parsed.totalAmount,
-      totalBoxes: parsed.totalBoxes,
-      totalBunches: parsed.totalBunches,
-      filename: String(body.filename || '').slice(0, 120),
-      uploadedAt: new Date().toISOString(),
-    };
     // 같은 경매일자를 다시 올리면 새 파일 내용으로 바꿉니다. (실수해도 다시 올리면 됩니다)
-    db.purchases = db.purchases.filter((p) => p.date !== parsed.date);
-    db.purchases.push(record);
-    db.purchases.sort((a, b) => b.date.localeCompare(a.date));
-    if (db.purchases.length > 30) db.purchases.length = 30; // 한 달치만 보관
-
-    logHistory('purchase',
-      `낙찰서 등록: ${record.date} 매입 ${record.totalAmount.toLocaleString('ko-KR')}원 (${record.items.length}줄)`
-      + (replaced ? ' — 같은 날짜를 새 파일로 바꿈' : ''));
+    const { record, replaced } = storePurchase(parsed, body.filename, 'upload');
     return { purchase: record, replaced, warning: parsed.warning || '' };
+  },
+
+  // 낙찰서 한 장의 품목별 상세 ([자세히]를 누를 때)
+  'GET /api/purchases/:id': (_body, { id }) => {
+    const purchase = db.purchases.find((p) => p.id === id);
+    if (!purchase) throw httpError(404, '매입 기록을 찾을 수 없습니다.');
+    return { purchase };
+  },
+
+  // 다운로드 폴더 자동 가져오기 켜기/끄기. 켜면 바로 한 번 확인합니다.
+  'POST /api/purchases/auto': (body) => {
+    db.purchaseAuto.enabled = Boolean(body.enabled);
+    logHistory('purchase', `낙찰서 자동 가져오기 ${db.purchaseAuto.enabled ? '켜짐' : '꺼짐'}`);
+    const imported = db.purchaseAuto.enabled ? scanDownloads() : [];
+    return { purchaseAuto: purchaseAutoPublic(), imported };
   },
 
   // 잘못 올린 낙찰서 삭제 (언제든 다시 올릴 수 있습니다)
@@ -1264,6 +1441,9 @@ const routes = {
     lines.push(db.purchases.length
       ? `매입 낙찰서: ${db.purchases.length}건 (최근 ${db.purchases[0].date} · ${db.purchases[0].totalAmount.toLocaleString('ko-KR')}원)`
       : '매입 낙찰서: 아직 없음 — 공판장 낙찰서 엑셀을 올리면 날짜별 매입·남는 돈이 나옵니다.');
+    if (!db.purchaseAuto.enabled) lines.push('  낙찰서 자동 가져오기: 꺼짐');
+    else if (purchaseScan.dir) lines.push(`  낙찰서 자동 가져오기: 켜짐 (${purchaseScan.dir})`);
+    else lines.push('  낙찰서 자동 가져오기: 다운로드 폴더를 찾지 못함 — [📥 낙찰서 엑셀 올리기]로 올려 주세요.');
 
     return { lines, problems, ok: problems.length === 0 };
   },
@@ -1350,8 +1530,10 @@ const routes = {
 
   'POST /api/reset-all': () => {
     const nongra = { ...db.nongra, processed: {} }; // 연동 설정은 남겨둡니다.
+    const purchaseAuto = db.purchaseAuto; // 이미 본 낙찰서 파일이 비운 뒤 다시 들어오지 않게
     db = emptyDb();
     db.nongra = nongra;
+    db.purchaseAuto = purchaseAuto;
     return { ok: true };
   },
 };
@@ -2543,6 +2725,19 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+// 엑셀에서 한글이 깨지지 않게 BOM을 붙인 CSV로 내려보냅니다.
+function sendCsv(res, asciiName, fileName, rows) {
+  const csv = '﻿' + rows
+    .map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(','))
+    .join('\r\n');
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    'Cache-Control': 'no-store',
+  });
+  return res.end(csv);
+}
+
 function serveStatic(req, res, pathname) {
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const filePath = path.join(PUBLIC_DIR, rel);
@@ -2594,15 +2789,37 @@ const server = http.createServer(async (req, res) => {
         o.memo || '',
       ]);
     }
-    const csv = '﻿' + rows
-      .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
-      .join('\r\n');
-    res.writeHead(200, {
-      'Content-Type': 'text/csv; charset=utf-8',
-      'Content-Disposition': 'attachment; filename="shipping.csv"',
-      'Cache-Control': 'no-store',
-    });
-    return res.end(csv);
+    return sendCsv(res, 'shipping.csv', 'shipping.csv', rows);
+  }
+
+  // 장부용 엑셀(CSV): 날짜별 매출·매입·남는 돈과 달마다 합계 (예전에 손으로 하던 매출 정리)
+  if (pathname === '/api/export/sales.csv') {
+    const rows = [['날짜', '주문(건)', '판매수량', '매출(원)', '매입(원)', '남는 돈(원)', '비고']];
+    let sum = null;
+    const closeMonth = () => {
+      if (!sum) return;
+      rows.push([`${sum.month} 합계`, sum.count, sum.qty, sum.amount, sum.purchase, sum.amount - sum.purchase,
+        sum.missing ? `낙찰서 없는 날 ${sum.missing}일 (그날 매입은 빠져 있음)` : '']);
+      rows.push([]);
+    };
+    for (const r of dailyRows().reverse()) { // 오래된 날짜부터
+      const month = /^\d{4}-\d{2}-\d{2}$/.test(r.label) ? r.label.slice(0, 7) : '';
+      if (!sum || sum.month !== month) {
+        closeMonth();
+        sum = { month, count: 0, qty: 0, amount: 0, purchase: 0, missing: 0 };
+      }
+      const bought = r.purchase != null;
+      rows.push([r.label, r.count, r.qty, r.amount,
+        bought ? r.purchase : '', bought ? r.amount - r.purchase : '', bought ? '' : '낙찰서 없음']);
+      sum.count += r.count;
+      sum.qty += r.qty;
+      sum.amount += r.amount;
+      if (bought) sum.purchase += r.purchase;
+      else sum.missing += 1;
+    }
+    closeMonth();
+    const today = dateLabel(new Date());
+    return sendCsv(res, `sales-ledger-${today}.csv`, `매출장부_${today}.csv`, rows);
   }
 
   if (!pathname.startsWith('/api/')) return serveStatic(req, res, pathname);
